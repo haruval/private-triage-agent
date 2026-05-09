@@ -1,0 +1,6 @@
+ollama
+anthropic
+spacy
+pytest
+pyyaml
+rich
