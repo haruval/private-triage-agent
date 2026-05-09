@@ -1,11 +1,12 @@
 VENV := venv
+PYTHON_BIN ?= python3.12
 PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 
 .PHONY: install test clean
 
 install:
-	python3 -m venv $(VENV)
+	$(PYTHON_BIN) -m venv $(VENV)
 	$(PIP) install --upgrade pip
 	$(PIP) install -r requirements.txt
 	$(PYTHON) -m spacy download en_core_web_trf
