@@ -24,13 +24,7 @@ lock:
 	@echo "Lockfile regenerated. Review and commit requirements.lock.txt."
 
 test:
-	@$(PYTHON) -m pytest; status=$$?; \
-	if [ $$status -eq 5 ]; then \
-		echo "(no tests collected — skeleton phase, treating as ok)"; \
-		exit 0; \
-	else \
-		exit $$status; \
-	fi
+	$(PYTHON) -m pytest
 
 clean:
 	rm -rf $(VENV)
