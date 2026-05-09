@@ -29,3 +29,7 @@ cp .env.example .env    # then fill in ANTHROPIC_API_KEY
 make test    # run the test suite
 make clean   # remove venv and caches
 ```
+
+## test triage
+source venv/bin/activate
+python -m src.cli triage-emails data/dev_corpus.mbox --limit 5
