@@ -4,15 +4,15 @@ A privacy-preserving email triage agent. A local model (`gemma3:27b` via Ollama)
 
 ## Layout
 
-- `src/ingestion/` — loaders for `.mbox` files and (later) IMAP
-- `src/triage/` — local model classification and drafting
-- `src/anonymize/` — anonymization, mapping store, re-hydration
-- `src/router/` — sensitivity scoring and escalation logic
-- `src/delegate/` — Claude API client
-- `src/eval/` — evaluation harness and leak detector
-- `tests/` — pytest tests
-- `data/` — gitignored, for corpora
-- `configs/` — YAML config files
+- `src/ingestion/` - loaders for `.mbox` files and (later) IMAP
+- `src/triage/` - local model classification and drafting
+- `src/anonymize/` - anonymization, mapping store, re-hydration
+- `src/router/` - sensitivity scoring and escalation logic
+- `src/delegate/` - Claude API client
+- `src/eval/` - evaluation harness and leak detector
+- `tests/` - pytest tests
+- `data/` - gitignored, for corpora
+- `configs/` - YAML config files
 
 ## Setup
 
@@ -20,7 +20,7 @@ Requires Python 3 and [Ollama](https://ollama.com/) installed locally with `gemm
 
 ```sh
 make install            # create venv, install requirements, download spaCy model
-cp .env.example .env    # then fill in ANTHROPIC_API_KEY
+cp .env.example .env    # fill in ANTHROPIC_API_KEY
 ```
 
 ## Usage
