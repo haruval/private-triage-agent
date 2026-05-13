@@ -14,6 +14,7 @@ downstream acts on it yet.
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 from itertools import islice
 from pathlib import Path
@@ -174,7 +175,22 @@ def _cmd_triage_emails(args: argparse.Namespace) -> int:
     failed = 0
     escalated = 0
 
-    emails = islice(load_mbox(mbox_path), args.limit)
+    if args.shuffle:
+        all_emails = list(load_mbox(mbox_path))
+        rng = random.Random(args.seed)
+        if args.limit < len(all_emails):
+            emails_iter: list[Email] = rng.sample(all_emails, args.limit)
+        else:
+            emails_iter = all_emails
+            rng.shuffle(emails_iter)
+        seed_note = f", seed {args.seed}" if args.seed is not None else ""
+        console.print(
+            f"[dim](shuffled {len(emails_iter)} of {len(all_emails)} emails{seed_note})[/]"
+        )
+        emails: object = emails_iter
+    else:
+        emails = islice(load_mbox(mbox_path), args.limit)
+
     for i, email in enumerate(emails, start=1):
         subject_preview = (email.subject or "(no subject)")[:60]
         try:
@@ -232,6 +248,20 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=10,
         help="Maximum number of emails to process (default: 10)",
+    )
+    triage_parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help=(
+            "Randomly sample emails from the mbox instead of taking the first N. "
+            "Pair with --seed for a reproducible random subset."
+        ),
+    )
+    triage_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for --shuffle (omit for nondeterministic).",
     )
     triage_parser.set_defaults(func=_cmd_triage_emails)
 
