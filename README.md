@@ -33,11 +33,11 @@ make clean   # remove venv and caches
 
 ## test triage cli
 source venv/bin/activate
-# Default behavior (deterministic, first 5)
+### Default behavior (deterministic, first 5)
 python -m src.cli triage-emails data/dev_corpus.mbox --limit 5
 
-# Different random 5 each run
+### Different random 5 each run
 python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle
 
-# Same random 5 every run (reproducible)
+### Same random 5 every run (reproducible)
 python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle --seed 42
