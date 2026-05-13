@@ -6,6 +6,9 @@ PIP := $(VENV)/bin/pip
 .PHONY: install lock test clean
 
 install:
+	@if [ -f requirements.lock.txt ]; then \
+		$(PYTHON_BIN) scripts/check_package_ages.py || exit $$?; \
+	fi
 	$(PYTHON_BIN) -m venv $(VENV)
 	$(PIP) install --upgrade pip
 	@if [ -f requirements.lock.txt ]; then \
