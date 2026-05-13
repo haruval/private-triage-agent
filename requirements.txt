@@ -4,3 +4,7 @@ spacy
 pytest
 pyyaml
 rich
+fastcoref
+# fastcoref 2.1.6 calls FCorefModel.all_tied_weights_keys, which was renamed in
+# transformers 5.x. Pin until upstream catches up.
+transformers<5
