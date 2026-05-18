@@ -41,3 +41,7 @@ python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle
 
 ### Same random 5 every run (reproducible)
 python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle --seed 42
+
+## test anonmymizer
+python -m src.cli anonymize-emails data/dev_corpus.mbox --limit 2
+python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer coref --shuffle --seed 42

@@ -14,15 +14,20 @@ downstream acts on it yet.
 from __future__ import annotations
 
 import argparse
+import json
 import random
+import re
 import sys
 from itertools import islice
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from src.anonymize.ner_anonymizer import CombinedAnonymizer
+from src.anonymize.regex_anonymizer import RegexAnonymizer
 from src.ingestion.mbox_loader import Email, load_mbox
 from src.triage.classifier import TriageResult, triage
 from src.triage.ollama_client import OllamaClient
@@ -223,6 +228,217 @@ def _cmd_triage_emails(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: anonymize-emails  (preview of the Claude delegation payload)
+# ---------------------------------------------------------------------------
+
+
+# Preview-only constants. The real delegate (prompt 14) will own these for
+# production use; here they exist so the user can eyeball exactly what would
+# leave the box on an escalation.
+CLAUDE_PREVIEW_MODEL = "claude-opus-4-7"
+CLAUDE_PREVIEW_MAX_TOKENS = 1024
+CLAUDE_SYSTEM_PROMPT = (
+    "You are an email triage assistant. The user message contains an "
+    "anonymized email. Names, organizations, phone numbers, dollar amounts, "
+    "dates, and other PII have been replaced with proper-noun-shaped "
+    "placeholders such as Alex_P1, Acme_O1, Phone_F1, Date_D1. Preserve "
+    "every placeholder verbatim in your response — do not invent new "
+    "placeholders, do not paraphrase them, do not strip their suffixes."
+)
+DEFAULT_PREVIEW_TASK = (
+    "Draft a concise reply to the email below. Reply in plain text only."
+)
+
+_PLACEHOLDER_RE = re.compile(r"[A-Z][a-z]+_[A-Z]\d+")
+
+
+def _build_anonymizer(name: str) -> tuple[Any, str]:
+    if name == "regex":
+        return RegexAnonymizer(), "regex"
+    if name == "combined":
+        return CombinedAnonymizer(), "regex+ner"
+    if name == "coref":
+        from src.anonymize.coref_anonymizer import CorefAnonymizer
+        return CorefAnonymizer(), "regex+ner+coref"
+    raise ValueError(f"unknown anonymizer: {name!r}")
+
+
+def _build_user_message(email: Email, task: str) -> str:
+    """Render the full Claude user message in plain text.
+
+    Subject and From are included alongside the body so the anonymizer can
+    redact PII from all three in a single pass — keeping placeholder
+    numbering consistent across header and body.
+    """
+    return (
+        f"Task: {task}\n\n"
+        f"Subject: {email.subject or '(no subject)'}\n"
+        f"From: {email.from_addr or '(unknown)'}\n"
+        f"\n"
+        f"{email.body_plain}"
+    )
+
+
+def _build_claude_request(
+    anonymized_user_message: str,
+) -> dict[str, Any]:
+    return {
+        "model": CLAUDE_PREVIEW_MODEL,
+        "max_tokens": CLAUDE_PREVIEW_MAX_TOKENS,
+        "system": CLAUDE_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": anonymized_user_message}],
+    }
+
+
+def _highlight_placeholders(text: str) -> Text:
+    out = Text()
+    cursor = 0
+    for m in _PLACEHOLDER_RE.finditer(text):
+        if m.start() > cursor:
+            out.append(text[cursor : m.start()])
+        out.append(m.group(0), style="bold cyan")
+        cursor = m.end()
+    if cursor < len(text):
+        out.append(text[cursor:])
+    return out
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + f"\n[… {len(text) - max_chars} more chars truncated]"
+
+
+def _render_anonymize_panel(
+    email: Email,
+    original_user_message: str,
+    anonymized_user_message: str,
+    mapping: dict[str, str],
+    anonymizer_label: str,
+    claude_request: dict[str, Any],
+    *,
+    max_body_chars: int,
+) -> Panel:
+    border = "cyan" if mapping else "dim"
+    body = Text()
+
+    def _label(name: str) -> None:
+        body.append(f"{name:<13}: ", style="dim")
+
+    _label("from")
+    body.append(f"{email.from_addr or '(unknown)'}\n")
+
+    _label("anonymizer")
+    body.append(anonymizer_label)
+    body.append(
+        f"  •  {len(mapping)} placeholder{'' if len(mapping) == 1 else 's'}",
+        style="dim",
+    )
+    body.append("\n\n")
+
+    body.append("original message:\n", style="dim")
+    body.append(_truncate(original_user_message, max_body_chars))
+    body.append("\n\n")
+
+    body.append("anonymized message (what Claude would see):\n", style="dim")
+    body.append_text(_highlight_placeholders(_truncate(anonymized_user_message, max_body_chars)))
+    body.append("\n\n")
+
+    body.append("mapping:\n", style="dim")
+    if mapping:
+        for placeholder, value in mapping.items():
+            body.append("  • ", style="dim")
+            body.append(placeholder, style="bold cyan")
+            body.append(" → ", style="dim")
+            body.append(f"{value}\n")
+    else:
+        body.append("  (none — nothing in this email was anonymized)\n", style="dim")
+    body.append("\n")
+
+    body.append("Claude API request (preview — not sent):\n", style="dim")
+    body.append(json.dumps(claude_request, indent=2, ensure_ascii=False))
+
+    title = email.subject.strip() if email.subject else "(no subject)"
+    return Panel(body, title=title, title_align="left", border_style=border)
+
+
+def _cmd_anonymize_emails(args: argparse.Namespace) -> int:
+    mbox_path = Path(args.mbox_path)
+    if not mbox_path.exists():
+        console.print(f"[red]mbox not found:[/] {mbox_path}")
+        return 1
+
+    with console.status(
+        f"[cyan]Loading anonymizer ({args.anonymizer})…", spinner="dots"
+    ):
+        anonymizer, anon_label = _build_anonymizer(args.anonymizer)
+
+    console.print(
+        f"[dim]Reading[/] [bold]{mbox_path}[/] "
+        f"[dim](limit {args.limit}, anonymizer {anon_label}, "
+        f"model {CLAUDE_PREVIEW_MODEL})[/]"
+    )
+    console.print()
+
+    if args.shuffle:
+        all_emails = list(load_mbox(mbox_path))
+        rng = random.Random(args.seed)
+        if args.limit < len(all_emails):
+            emails_iter: list[Email] = rng.sample(all_emails, args.limit)
+        else:
+            emails_iter = all_emails
+            rng.shuffle(emails_iter)
+        seed_note = f", seed {args.seed}" if args.seed is not None else ""
+        console.print(
+            f"[dim](shuffled {len(emails_iter)} of {len(all_emails)} emails{seed_note})[/]"
+        )
+        emails: object = emails_iter
+    else:
+        emails = islice(load_mbox(mbox_path), args.limit)
+
+    processed = 0
+    failed = 0
+    total_placeholders = 0
+
+    for i, email in enumerate(emails, start=1):
+        subject_preview = (email.subject or "(no subject)")[:60]
+        try:
+            user_message = _build_user_message(email, args.task)
+            with console.status(
+                f"[cyan]Anonymizing [{i}] {subject_preview}", spinner="dots"
+            ):
+                anonymized, mapping = anonymizer.anonymize(user_message)
+        except Exception as exc:
+            console.print(_render_failure_panel(email, exc))
+            failed += 1
+            processed += 1
+            continue
+
+        claude_request = _build_claude_request(anonymized)
+        console.print(
+            _render_anonymize_panel(
+                email,
+                user_message,
+                anonymized,
+                mapping,
+                anon_label,
+                claude_request,
+                max_body_chars=args.max_chars,
+            )
+        )
+        total_placeholders += len(mapping)
+        processed += 1
+
+    console.rule(style="dim")
+    console.print(
+        f"Processed [bold]{processed}[/]  •  "
+        f"[red]{failed}[/] failed  •  "
+        f"[cyan]{total_placeholders}[/] total placeholders"
+    )
+    return 0 if failed == 0 else 2
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -264,6 +480,55 @@ def main(argv: list[str] | None = None) -> int:
         help="Random seed for --shuffle (omit for nondeterministic).",
     )
     triage_parser.set_defaults(func=_cmd_triage_emails)
+
+    anon_parser = subparsers.add_parser(
+        "anonymize-emails",
+        help="Anonymize emails and preview the Claude API request body.",
+        description=(
+            "Iterate through an .mbox file, run each email through the chosen "
+            "anonymizer, and print a rich-formatted panel showing the original "
+            "message, the anonymized message (placeholders highlighted), the "
+            "placeholder → original mapping, and the exact request body that "
+            "would be sent to the Claude API on escalation. Nothing is sent."
+        ),
+    )
+    anon_parser.add_argument("mbox_path", type=str, help="Path to an .mbox file")
+    anon_parser.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Maximum number of emails to process (default: 5)",
+    )
+    anon_parser.add_argument(
+        "--anonymizer",
+        choices=["regex", "combined", "coref"],
+        default="combined",
+        help="Anonymization strategy (default: combined = regex + NER)",
+    )
+    anon_parser.add_argument(
+        "--task",
+        type=str,
+        default=DEFAULT_PREVIEW_TASK,
+        help="Task description shown to Claude in the user message",
+    )
+    anon_parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=800,
+        help="Truncate original/anonymized message bodies to this many chars (default: 800)",
+    )
+    anon_parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Randomly sample emails from the mbox instead of taking the first N.",
+    )
+    anon_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for --shuffle (omit for nondeterministic).",
+    )
+    anon_parser.set_defaults(func=_cmd_anonymize_emails)
 
     args = parser.parse_args(argv)
     return args.func(args)
