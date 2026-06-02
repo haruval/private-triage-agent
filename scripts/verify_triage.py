@@ -17,8 +17,9 @@ from pathlib import Path
 
 from rich.console import Console
 
-from src.cli import _render_email_panel, _should_escalate
+from src.cli import _render_email_panel
 from src.ingestion.mbox_loader import load_mbox
+from src.router.sensitivity_scorer import SensitivityScorer
 from src.triage.classifier import triage
 from src.triage.ollama_client import OllamaClient
 
@@ -40,6 +41,7 @@ def main() -> int:
         return 1
 
     client = OllamaClient()
+    scorer = SensitivityScorer()
     console.print(
         f"[dim]Loading {MBOX_PATH} (limit {LIMIT}, model {client.model})…[/]\n"
     )
@@ -57,8 +59,9 @@ def main() -> int:
                 spinner="dots",
             ):
                 result = triage(email, client=client)
+            decision = scorer.score(email, result)
             triple.append((email, result, None))
-            console.print(_render_email_panel(email, result, _should_escalate(result)))
+            console.print(_render_email_panel(email, result, decision))
         except Exception as exc:
             triple.append((email, None, exc))
             console.print(f"[red]Error on email {i}: {exc}[/]")
@@ -117,8 +120,11 @@ def main() -> int:
                 md.append(result.suggested_reply_draft.replace("\n", "\n  > "))
                 md.append("\n")
             md.append(f"- **Reasoning:** {result.reasoning}\n")
-            escalate = _should_escalate(result)
-            md.append(f"- **Escalate flag:** `{escalate}`\n")
+            decision = scorer.score(email, result)
+            md.append(
+                f"- **Escalate flag:** `{decision.escalate}` "
+                f"(score {decision.score:.2f} — {decision.reason})\n"
+            )
 
         md.append("\n---\n\n")
 

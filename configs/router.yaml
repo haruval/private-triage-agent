@@ -1,0 +1,89 @@
+# Sensitivity-router weights for src/router/sensitivity_scorer.py.
+#
+# The scorer sums the weights of the signals that fire on an email and escalates
+# to Claude when that sum reaches `threshold` (or when a sender override fires).
+# The score is capped at 1.0. Tune the numbers here without touching code; the
+# file is loaded with yaml.safe_load.
+
+# Escalate when the summed signal weight is >= this.
+threshold: 0.5
+
+# Triage confidence strictly below this counts as "low confidence".
+confidence_floor: 0.8
+
+# A thread with at least this many messages counts as "long" (estimated from
+# the References / In-Reply-To headers).
+thread_length_threshold: 4
+
+# Per-signal weights. Anything a signal name maps to here is its contribution
+# to the score when it fires; an absent name contributes 0. Keyword categories
+# are referenced as `keyword_<category>` (see `keywords` below).
+weights:
+  low_confidence: 0.5      # local model was unsure → a second opinion helps
+  unclear_category: 0.5    # local model couldn't categorize it at all
+  long_thread: 0.2         # long back-and-forth tends to carry context/nuance
+  keyword_legal: 0.5       # contracts, liability — escalate on its own
+  keyword_financial: 0.4   # money movement; pairs with another signal to fire
+  keyword_negotiation: 0.4 # deal terms; pairs with another signal to fire
+  keyword_sensitive: 0.5   # confidential / PII flags — escalate on its own
+  keyword_technical: 0.25  # technical depth; a supporting signal only
+
+# Keyword lists, matched case-insensitively at a word boundary (so "contract"
+# also catches "contracts" / "contractual", but won't match mid-word). Add or
+# prune freely; the matched terms show up in the escalation reason string.
+keywords:
+  legal:
+    - contract
+    - agreement
+    - liability
+    - indemnif
+    - non-disclosure
+    - nda
+    - lawsuit
+    - litigation
+    - breach
+    - clause
+    - redline
+    - subpoena
+    - settlement
+  financial:
+    - invoice
+    - wire transfer
+    - purchase order
+    - refund
+    - salary
+    - compensation
+    - retainer
+    - payment terms
+  negotiation:
+    - counteroffer
+    - counter-offer
+    - negotiat
+    - sign-off
+    - concession
+    - proposal
+    - renewal
+  sensitive:
+    - confidential
+    - proprietary
+    - do not share
+    - internal only
+    - privileged
+    - social security
+    - ssn
+    - password
+    - credentials
+    - medical
+  technical:
+    - database
+    - deployment
+    - outage
+    - vulnerability
+    - migration
+    - architecture
+    - infrastructure
+
+# Emails from these senders always escalate, regardless of score. Match is by
+# exact address, or by domain when the entry begins with "@" (e.g. "@acme.com"
+# matches anyone at acme.com). Case-insensitive. Empty by default.
+always_escalate_senders: []

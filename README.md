@@ -110,6 +110,33 @@ python -m src.cli anonymize-emails data/dev_corpus.mbox --limit 2
 python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer regex --limit 2
 python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer coref --shuffle --seed 42
 
+## process emails (the full pipeline)
+source venv/bin/activate
+For each email: triage locally → score sensitivity → if it escalates, anonymize,
+send to Claude, and rehydrate the reply. Every email is shown with its
+classification, escalation decision, and draft (tagged `local` or `Claude`); you
+then approve / edit / reject. Approved drafts are written to
+`data/approved_drafts/` and every decision is logged to
+`logs/sessions/<timestamp>.jsonl`. **Nothing is ever sent automatically.**
+Escalations need `ANTHROPIC_API_KEY` (from `.env`); a run with nothing to
+escalate never calls Claude.
+
+### Interactive review of the first 10
+python -m src.cli process data/dev_corpus.mbox --limit 10
+
+### Present + log only, no approve/reject prompts (good for a quick look or CI)
+python -m src.cli process data/dev_corpus.mbox --limit 3 --no-input
+
+### Pick the anonymizer used for escalations (default: combined = regex + NER)
+python -m src.cli process data/dev_corpus.mbox --limit 5 --anonymizer regex
+
+### Reproducible random sample
+python -m src.cli process data/dev_corpus.mbox --limit 5 --shuffle --seed 42
+
+Other flags: `--task` (the instruction sent to Claude), `--config` (router YAML,
+default `configs/router.yaml`), `--approved-dir`, `--sessions-dir`, `--max-chars`
+(truncate the displayed original).
+
 ## run the test suite
 source venv/bin/activate
 ### All tests (includes the live Claude API integration tests; needs ANTHROPIC_API_KEY)

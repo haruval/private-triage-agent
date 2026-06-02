@@ -206,15 +206,16 @@ def select_escalation_emails(
 ) -> list[Email]:
     """Triage emails and keep the ones the router would escalate.
 
-    Reuses ``_should_escalate`` from the CLI so selection matches what the
+    Uses the real :class:`SensitivityScorer` so selection matches what the
     rest of the system considers escalate-worthy. Stops once ``num_emails``
     are collected (or ``scan_limit`` emails have been triaged).
     """
-    # Imported here to avoid a hard import cycle and to keep the heavy triage
-    # path out of the module import for tests that inject pre-selected emails.
-    from src.cli import _should_escalate
+    # Imported here to keep the heavy triage path out of the module import for
+    # tests that inject pre-selected emails.
+    from src.router.sensitivity_scorer import SensitivityScorer
     from src.triage.classifier import triage
 
+    scorer = SensitivityScorer()
     selected: list[Email] = []
     for i, email in enumerate(emails):
         if scan_limit is not None and i >= scan_limit:
@@ -224,7 +225,7 @@ def select_escalation_emails(
         except Exception as exc:  # a single bad email shouldn't abort selection
             console.print(f"[dim]skipped {email.id}: triage failed ({exc})[/]")
             continue
-        if _should_escalate(result):
+        if scorer.score(email, result).escalate:
             selected.append(email)
             if len(selected) >= num_emails:
                 break
