@@ -2,6 +2,69 @@
 
 A privacy-preserving email triage agent. A local model (`gemma3:27b` via Ollama) handles most processing; sensitive content is anonymized before being sent to the Claude API for harder reasoning, then re-hydrated locally.
 
+## What it does
+
+The local model triages every email: category, summary, action items, a reply
+draft. When it's uncertain or the content looks sensitive (legal, negotiation,
+dollar figures), the email is **anonymized**, sent to Claude for a stronger
+draft, then **re-hydrated** locally. Nothing is sent automatically: every draft
+is reviewed by you first. Here's one example of an email going through the pipeline.
+
+**1. Incoming email**
+
+```
+Subject: Contract renewal - need your sign-off by Friday
+From: sarah.chen@northwind.com
+
+Following up on the Northwind service contract. Legal flagged two changes to the
+liability cap and we should push back before signing. Can you review the redlines
+and confirm the $250,000 figure before Friday?
+
+Also - can we move our call to Thursday? Reach me at (415) 555-0182.
+```
+
+**2. Local triage** (`gemma3:27b`) — never leaves your machine
+
+```
+category    : action_required   (confidence 0.85)
+action items:
+  - Review the contract redlines
+  - Confirm the $250,000 figure
+  - Reschedule the call
+```
+
+The legal redlines and the dollar figure make this a candidate for escalation.
+
+**3. Anonymized before delegation** — this is all Claude sees
+
+```
+Subject: Contract renewal - need your sign-off by Date_D1
+From: Email_E1
+
+Following up on the Acme_O1 service contract. Legal flagged two changes to the
+liability cap and we should push back before signing. Can you review the redlines
+and confirm the Amount_M1 figure before Date_D1?
+
+Also - can we move our call to Date_D2? Reach me at Phone_F1.
+```
+
+PII becomes proper-noun-shaped placeholders; the mapping stays local —
+`Email_E1 → sarah.chen@northwind.com`, `Acme_O1 → Northwind`,
+`Amount_M1 → $250,000`, `Phone_F1 → (415) 555-0182`, `Date_D1 → Friday`,
+`Date_D2 → Thursday`, `Alex_P1 → Sarah`.
+
+**4. Claude's draft, re-hydrated locally** — placeholders swapped back, ready for review
+
+```
+Hi Sarah,
+
+Thanks for the heads up. I'll review the redlines and liability cap changes today
+and get back to you on the $250,000 figure by end of business tomorrow.
+
+Thursday works for my schedule. I'll give you a call at (415) 555-0182 to confirm
+timing.
+```
+
 ## Layout
 
 - `src/ingestion/` - loaders for `.mbox` files and (later) IMAP
@@ -44,4 +107,23 @@ python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle --seed 
 
 ## test anonmymizer
 python -m src.cli anonymize-emails data/dev_corpus.mbox --limit 2
+python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer regex --limit 2
 python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer coref --shuffle --seed 42
+
+## run the test suite
+source venv/bin/activate
+### All tests (includes the live Claude API integration tests; needs ANTHROPIC_API_KEY)
+python -m pytest
+
+### Live Claude API integration tests only
+python -m pytest -m integration
+
+### Everything except the live Claude API tests (offline, no key needed)
+python -m pytest -m "not integration"
+
+## test utility eval (does anonymization preserve enough meaning for Claude?)
+### Default: 10 escalate-worthy emails through the raw / regex / full pipelines, judged by gemma3:27b
+python -m src.eval.utility_eval
+
+### Quick run: fewer emails, bounded mbox scan
+python -m src.eval.utility_eval --num-emails 3 --scan-limit 20
