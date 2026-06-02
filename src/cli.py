@@ -43,7 +43,10 @@ CATEGORY_STYLE: dict[str, str] = {
     "unclear": "magenta",
 }
 
-ESCALATE_CONFIDENCE_THRESHOLD = 0.6
+# Escalate when the local model is anything short of confident. gemma3:27b
+# rarely reports confidence below ~0.75 on this corpus, so a 0.6 bar almost
+# never fired; 0.8 routes the genuinely uncertain cases to Claude.
+ESCALATE_CONFIDENCE_THRESHOLD = 0.8
 
 
 # ---------------------------------------------------------------------------
