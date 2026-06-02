@@ -167,6 +167,36 @@ def test_combined_regex_placeholders_pass_through(
     assert "$500" in mapping.values()
 
 
+def test_combined_same_type_placeholders_do_not_collide_and_round_trip(
+    combined_anonymizer: CombinedAnonymizer,
+) -> None:
+    """Regression: regex and NER share the date letter 'D' (and money 'M').
+
+    The regex pass tags the ISO date ``2025-03-14`` as ``Date_D1``; the NER
+    pass independently tags the weekday ``Friday`` as a DATE. Before the fix
+    both passes numbered from 1, so the NER ``Date_D1`` collided with the
+    regex ``Date_D1`` and the mapping merge dropped one — rehydration then
+    restored the wrong value. The passes must produce globally-unique
+    placeholders so the round-trip is exact.
+    """
+    from src.anonymize.rehydrate import rehydrate
+
+    text = "The deadline moved from 2025-03-14 to Friday; please confirm."
+    out, mapping = combined_anonymizer.anonymize(text)
+
+    # Both date values survive in the mapping, under distinct keys.
+    assert "2025-03-14" in mapping.values()
+    assert "Friday" in mapping.values()
+    assert len(set(mapping)) == len(mapping)  # no key collision
+    # Two date placeholders, both present in the output.
+    date_keys = [k for k in mapping if k.startswith("Date_D")]
+    assert len(date_keys) == 2, f"expected 2 date placeholders, got {date_keys}"
+    assert all(out.count(k) == 1 for k in date_keys)
+
+    # The merge is lossless and rehydration restores the original exactly.
+    assert rehydrate(out, mapping) == text
+
+
 def test_combined_detect_offsets_are_in_original_text(
     combined_anonymizer: CombinedAnonymizer,
 ) -> None:

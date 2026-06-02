@@ -19,6 +19,7 @@ re-tagged (or worse, partially re-tagged) by the NER pass.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,11 +61,40 @@ def _resolve_overlaps(hits: list[_RawHit]) -> list[_RawHit]:
     return sorted(chosen, key=lambda h: h.start)
 
 
-def _apply_placeholders(text: str, hits: list[_RawHit]) -> tuple[str, dict[str, str]]:
-    """Assign sequential placeholders per letter and substitute right-to-left."""
+_PLACEHOLDER_SUFFIX_RE = re.compile(r"_([A-Z])(\d+)$")
+
+
+def _counts_from_mapping(mapping: dict[str, str]) -> dict[str, int]:
+    """Highest placeholder number already used per letter.
+
+    Lets a second pass continue numbering (``Date_D2``, ``Date_D3``, …)
+    instead of restarting at 1 and colliding with the first pass's keys.
+    """
+    counts: dict[str, int] = {}
+    for placeholder in mapping:
+        m = _PLACEHOLDER_SUFFIX_RE.search(placeholder)
+        if not m:
+            continue
+        letter, num = m.group(1), int(m.group(2))
+        counts[letter] = max(counts.get(letter, 0), num)
+    return counts
+
+
+def _apply_placeholders(
+    text: str,
+    hits: list[_RawHit],
+    *,
+    start_counters: dict[str, int] | None = None,
+) -> tuple[str, dict[str, str]]:
+    """Assign sequential placeholders per letter and substitute right-to-left.
+
+    ``start_counters`` seeds the per-letter counters so a second pass picks up
+    where an earlier one left off (used by :class:`CombinedAnonymizer` to keep
+    NER placeholders from colliding with regex ones on shared letters).
+    """
     mapping: dict[str, str] = {}
     value_to_placeholder: dict[str, str] = {}
-    counters: dict[str, int] = {}
+    counters: dict[str, int] = dict(start_counters) if start_counters else {}
     for h in hits:
         if h.value in value_to_placeholder:
             continue
@@ -117,9 +147,11 @@ class NERAnonymizer:
         hits = self._scan(text)
         return [Detection(h.start, h.end, h.type, h.value) for h in hits]
 
-    def anonymize(self, text: str) -> tuple[str, dict[str, str]]:
+    def anonymize(
+        self, text: str, *, start_counters: dict[str, int] | None = None
+    ) -> tuple[str, dict[str, str]]:
         hits = self._scan(text)
-        return _apply_placeholders(text, hits)
+        return _apply_placeholders(text, hits, start_counters=start_counters)
 
     # --- internals --------------------------------------------------------
 
@@ -170,11 +202,17 @@ class CombinedAnonymizer:
 
     def anonymize(self, text: str) -> tuple[str, dict[str, str]]:
         regex_out, regex_map = self._regex.anonymize(text)
-        ner_out, ner_map = self._ner.anonymize(regex_out)
 
         # Regex placeholders use letters E/F/U/M/D/A/C/S; NER uses P/O/G/M/D/K.
-        # M and D nominally collide, but NER never tags a regex placeholder
-        # (Alex_E1 is not a MONEY/DATE pattern), so keys won't actually clash.
+        # The shared letters M (money) and D (date) DO collide: a regex
+        # ``Date_D1`` and an NER ``Date_D1`` would be the same key, and the
+        # merge below would silently drop one mapping. Seed the NER pass with
+        # the regex pass's per-letter counts so it continues numbering
+        # (``Date_D2``, …) and every placeholder stays globally unique.
+        ner_out, ner_map = self._ner.anonymize(
+            regex_out, start_counters=_counts_from_mapping(regex_map)
+        )
+
         merged = {**regex_map, **ner_map}
         return ner_out, merged
 
