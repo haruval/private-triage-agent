@@ -23,7 +23,7 @@ and confirm the $250,000 figure before Friday?
 Also - can we move our call to Thursday? Reach me at (415) 555-0182.
 ```
 
-**2. Local triage** (`gemma3:27b`) — never leaves your machine
+**2. Local triage** (`gemma3:27b`) - never leaves your machine
 
 ```
 category    : action_required   (confidence 0.85)
@@ -35,7 +35,7 @@ action items:
 
 The legal redlines and the dollar figure make this a candidate for escalation.
 
-**3. Anonymized before delegation** — this is all Claude sees
+**3. Anonymized before delegation** - this is all Claude sees
 
 ```
 Subject: Contract renewal - need your sign-off by Date_D1
@@ -53,7 +53,7 @@ PII becomes proper-noun-shaped placeholders; the mapping stays local —
 `Amount_M1 → $250,000`, `Phone_F1 → (415) 555-0182`, `Date_D1 → Friday`,
 `Date_D2 → Thursday`, `Alex_P1 → Sarah`.
 
-**4. Claude's draft, re-hydrated locally** — placeholders swapped back, ready for review
+**4. Claude's draft, re-hydrated locally** - placeholders swapped back, ready for review
 
 ```
 Hi Sarah,
