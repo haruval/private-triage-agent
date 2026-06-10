@@ -8,6 +8,7 @@ Usage:
     python -m src.cli start            data/inbox
     python -m src.cli start-imap       --days 7
     python -m src.cli review
+    python -m src.cli reset
 
 ``triage-emails`` runs the local model and prints a result panel per email.
 ``anonymize-emails`` previews exactly what would leave the box on escalation.
@@ -1432,6 +1433,49 @@ def _cmd_start_imap(args: argparse.Namespace) -> int:
     return _run_start_pipeline(emails, sources, args, queue_dir)
 
 
+def _cmd_reset(args: argparse.Namespace) -> int:
+    """Delete the queue ledgers so the next `start` reprocesses everything."""
+    queue_dir = Path(args.queue_dir)
+    targets = [
+        review_queue.processed_path(queue_dir),
+        review_queue.reviewed_path(queue_dir),
+    ]
+    existing = [p for p in targets if p.exists()]
+    if not existing:
+        console.print(f"[green]Queue is already empty[/] [dim]({queue_dir})[/]")
+        return 0
+
+    n_processed = len(review_queue.load_records(queue_dir))
+    n_reviewed = len(review_queue.reviewed_ids(queue_dir))
+    console.print(
+        f"This deletes [bold]{n_processed}[/] processed record(s) and "
+        f"[bold]{n_reviewed}[/] review decision(s) from [bold]{queue_dir}[/]; "
+        f"the next `start` will reprocess everything."
+    )
+    console.print("[dim]Approved drafts and session logs are not touched.[/]")
+
+    if not args.yes:
+        try:
+            confirm = Prompt.ask(
+                "  [bold]reset the queue?[/] \\[y]es / \\[n]o",
+                choices=["y", "n"],
+                default="n",
+            )
+        except EOFError:
+            confirm = "n"
+        if confirm != "y":
+            console.print("[dim]aborted — nothing deleted[/]")
+            return 0
+
+    for path in existing:
+        path.unlink()
+    console.print(
+        f"[green]Queue reset[/] — deleted "
+        f"{', '.join(str(p) for p in existing)}"
+    )
+    return 0
+
+
 def _cmd_review(args: argparse.Namespace) -> int:
     """Interactively review every queued email not yet reviewed."""
     queue_dir = Path(args.queue_dir)
@@ -1825,6 +1869,30 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory for the processed/reviewed ledgers (default: data/queue)",
     )
     review_parser.set_defaults(func=_cmd_review)
+
+    reset_parser = subparsers.add_parser(
+        "reset",
+        help="Reset the review queue so the next `start` reprocesses everything.",
+        description=(
+            "Delete the queue ledgers (processed.jsonl and reviewed.jsonl) under "
+            "the queue directory, so the next `start` run treats every email as "
+            "new. Approved drafts in data/approved_drafts/ and session logs are "
+            "not touched. Mainly for testing."
+        ),
+    )
+    reset_parser.add_argument(
+        "--queue-dir",
+        type=str,
+        default=str(review_queue.DEFAULT_QUEUE_DIR),
+        help="Directory for the processed/reviewed ledgers (default: data/queue)",
+    )
+    reset_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Skip the confirmation prompt.",
+    )
+    reset_parser.set_defaults(func=_cmd_reset)
 
     args = parser.parse_args(argv)
     return args.func(args)

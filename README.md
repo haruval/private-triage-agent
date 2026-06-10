@@ -184,6 +184,14 @@ python -m src.cli review --max-chars 2000             # show more of each origin
 `start`/`start-imap` also take `--task`, `--config`, `--queue-dir`; `review`
 also takes `--queue-dir`, `--approved-dir`, `--sessions-dir`.
 
+While testing, `reset` clears the queue so the next `start` reprocesses
+everything (approved drafts and session logs are kept):
+
+```sh
+python -m src.cli reset       # asks for confirmation
+python -m src.cli reset -y    # skip the prompt
+```
+
 ### Method 1: Download your emails as an MBOX (recommended)
 If you use a Mac, Apple Mail is the most straightforward option because it natively supports exporting directly to .mbox without leaving the app.
 1. Open Apple Mail.
