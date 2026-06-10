@@ -4,12 +4,16 @@ Usage:
     python -m src.cli triage-emails    data/dev_corpus.mbox --limit 10
     python -m src.cli anonymize-emails data/dev_corpus.mbox --limit 5
     python -m src.cli process          data/dev_corpus.mbox --limit 10
+    python -m src.cli process-old      data/dev_corpus.mbox --limit 10
 
 ``triage-emails`` runs the local model and prints a result panel per email.
 ``anonymize-emails`` previews exactly what would leave the box on escalation.
 ``process`` is the full loop: triage locally → score sensitivity → for the
 escalated emails, anonymize, delegate to Claude, and rehydrate the reply →
-present everything for human approve/reject/edit. Nothing is ever sent
+present everything for human approve/reject/edit. Processing runs on a
+background thread, so you review the first email while the rest are still
+being triaged and delegated; ``process-old`` is the original fully sequential
+version (process one, review one, repeat). Nothing is ever sent
 automatically; approved drafts are written to ``data/approved_drafts/`` and
 every decision is appended to ``logs/sessions/<timestamp>.jsonl``.
 """
@@ -18,12 +22,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import queue
 import random
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import islice
@@ -424,7 +431,8 @@ def _cmd_anonymize_emails(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Subcommand: process  (full pipeline — triage, escalate, delegate, review)
+# Subcommands: process / process-old  (full pipeline — triage, escalate,
+# delegate, review)
 # ---------------------------------------------------------------------------
 
 
@@ -691,7 +699,8 @@ def _select_emails(
     return list(islice(load_mbox(mbox_path), limit))
 
 
-def _cmd_process(args: argparse.Namespace) -> int:
+def _cmd_process_old(args: argparse.Namespace) -> int:
+    """Sequential pipeline: process one email, review it, then move on."""
     mbox_path = Path(args.mbox_path)
     if not mbox_path.exists():
         console.print(f"[red]mbox not found:[/] {mbox_path}")
@@ -789,6 +798,246 @@ def _cmd_process(args: argparse.Namespace) -> int:
         if interactive:
             action = _prompt_action(bool(p.draft and p.draft.strip()))
             if action == "quit":
+                _append_session_record(session_path, _session_record(p, "quit", None))
+                quit_early = True
+                processed += 1
+                break
+            draft_to_save = p.draft or ""
+            if action == "edit":
+                draft_to_save = _edit_draft(draft_to_save)
+            if action in ("approve", "edit") and draft_to_save.strip():
+                saved_path = _save_approved_draft(p, draft_to_save, out_dir)
+                approved += 1
+                console.print(f"  [green]saved →[/] {saved_path}")
+            elif action == "reject":
+                console.print("  [dim]rejected — nothing saved[/]")
+
+        _append_session_record(session_path, _session_record(p, action, saved_path))
+        processed += 1
+        console.print()
+
+    console.rule(style="dim")
+    note = " (stopped early)" if quit_early else ""
+    console.print(
+        f"Processed [bold]{processed}[/]{note}  •  "
+        f"[yellow]{escalated}[/] escalated  •  "
+        f"[green]{approved}[/] approved  •  "
+        f"[red]{failed}[/] failed"
+    )
+    console.print(f"[dim]Decisions logged to[/] {session_path}")
+    return 0 if failed == 0 else 2
+
+
+@dataclass
+class _ProcessOutcome:
+    """One email's background-processing result, handed to the review loop.
+
+    ``processed`` is None when triage itself failed; ``error`` then carries
+    the exception. ``notes`` are one-time warnings raised on the worker (e.g.
+    Claude client construction failed) for the review loop to print — the
+    worker never touches the console itself.
+    """
+
+    email: Email
+    processed: ProcessedEmail | None
+    error: Exception | None
+    notes: list[str]
+
+
+class _WorkerLogCapture(logging.Handler):
+    """Buffers project log output emitted while the worker runs.
+
+    ``rehydrate()`` (and any other ``src.*`` module) logs warnings straight to
+    stderr by default; from the worker thread that text would land in the
+    middle of whatever the reviewer is typing at the prompt. Buffer it here
+    and ship it through the outcome queue as notes instead.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+    def drain(self) -> list[str]:
+        out, self.messages = self.messages, []
+        return out
+
+
+def _process_worker(
+    emails: list[Email],
+    outcomes: queue.Queue[_ProcessOutcome | None],
+    stop: threading.Event,
+    *,
+    ollama_client: OllamaClient,
+    scorer: SensitivityScorer,
+    anonymizer: Any,
+    task: str,
+) -> None:
+    """Triage / score / delegate every email, queueing each result as it lands.
+
+    Runs on a background thread so the reviewer can act on early emails while
+    later ones are still processing. Emails are handled in order, one at a
+    time (the local model is the bottleneck; parallel calls wouldn't help).
+    Ends the stream with a ``None`` sentinel; checks ``stop`` between emails
+    so a quit doesn't keep burning model calls.
+    """
+    capture = _WorkerLogCapture()
+    src_logger = logging.getLogger("src")
+    src_logger.addHandler(capture)
+    prev_propagate = src_logger.propagate
+    src_logger.propagate = False  # keep records off stderr while we hold them
+
+    claude_client: ClaudeClient | None = None
+    claude_init_failed = False
+    try:
+        for email in emails:
+            if stop.is_set():
+                break
+            notes: list[str] = []
+            try:
+                result = triage(email, client=ollama_client)
+            except Exception as exc:
+                notes.extend(capture.drain())
+                outcomes.put(
+                    _ProcessOutcome(email=email, processed=None, error=exc, notes=notes)
+                )
+                continue
+
+            decision = scorer.score(email, result)
+            # Construct the Claude client lazily, on the first escalation, so a
+            # run with nothing to escalate never needs an API key.
+            if decision.escalate and claude_client is None and not claude_init_failed:
+                try:
+                    claude_client = ClaudeClient()
+                except Exception as exc:
+                    claude_init_failed = True
+                    notes.append(
+                        f"Claude client unavailable ({exc}); "
+                        f"escalations will keep their local draft"
+                    )
+
+            p = _build_processed(
+                email,
+                result,
+                decision,
+                anonymizer=anonymizer,
+                claude_client=claude_client,
+                task=task,
+            )
+            notes.extend(capture.drain())
+            outcomes.put(
+                _ProcessOutcome(email=email, processed=p, error=None, notes=notes)
+            )
+    finally:
+        src_logger.removeHandler(capture)
+        src_logger.propagate = prev_propagate
+        # Sentinel goes in the finally so an unexpected worker crash can't
+        # leave the review loop blocked on the queue forever.
+        outcomes.put(None)
+
+
+def _cmd_process(args: argparse.Namespace) -> int:
+    """Pipelined version: a worker thread processes every email up front
+    while the foreground loop presents each one for review as soon as it is
+    ready — reviewing email 1 never waits for emails 2..N to finish."""
+    mbox_path = Path(args.mbox_path)
+    if not mbox_path.exists():
+        console.print(f"[red]mbox not found:[/] {mbox_path}")
+        return 1
+
+    try:
+        scorer = SensitivityScorer(config_path=args.config)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]router config error:[/] {exc}")
+        return 1
+
+    ollama_client = OllamaClient()
+    with console.status(
+        f"[cyan]Loading anonymizer ({args.anonymizer})…", spinner="dots"
+    ):
+        anonymizer, anon_label = _build_anonymizer(args.anonymizer)
+
+    out_dir = Path(args.approved_dir)
+    session_path = (
+        Path(args.sessions_dir) / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    )
+    interactive = sys.stdin.isatty() and not args.no_input
+
+    console.print(
+        f"[dim]Processing[/] [bold]{mbox_path}[/] "
+        f"[dim](limit {args.limit}, anonymizer {anon_label}, "
+        f"triage {ollama_client.model}, background processing)[/]"
+    )
+    if not interactive:
+        console.print("[dim](non-interactive: presenting + logging only, no prompts)[/]")
+    console.print(f"[dim]session log → {session_path}[/]")
+    console.print()
+
+    emails = _select_emails(mbox_path, args.limit, args.shuffle, args.seed)
+
+    outcomes: queue.Queue[_ProcessOutcome | None] = queue.Queue()
+    stop = threading.Event()
+    worker = threading.Thread(
+        target=_process_worker,
+        args=(emails, outcomes, stop),
+        kwargs={
+            "ollama_client": ollama_client,
+            "scorer": scorer,
+            "anonymizer": anonymizer,
+            "task": args.task,
+        },
+        daemon=True,  # quitting mid-review must not wait out an in-flight call
+    )
+    worker.start()
+
+    processed = failed = escalated = approved = 0
+    quit_early = False
+
+    # The worker preserves order, so outcome i pairs with emails[i].
+    for i, email in enumerate(emails, start=1):
+        subject_preview = (email.subject or "(no subject)")[:60]
+        with console.status(
+            f"[cyan]Processing [{i}] {subject_preview}", spinner="dots"
+        ):
+            item = outcomes.get()
+        if item is None:  # defensive: stream ended early
+            break
+
+        for note in item.notes:
+            console.print(Text(note, style="yellow"))
+
+        if item.processed is None:
+            assert item.error is not None
+            console.print(_render_failure_panel(item.email, item.error))
+            _append_session_record(
+                session_path,
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "email_id": item.email.id,
+                    "from": item.email.from_addr,
+                    "subject": item.email.subject,
+                    "action": "error",
+                    "error": f"{type(item.error).__name__}: {item.error}",
+                },
+            )
+            failed += 1
+            processed += 1
+            continue
+
+        p = item.processed
+        if p.decision.escalate:
+            escalated += 1
+
+        console.print(_render_process_panel(p, max_body_chars=args.max_chars))
+
+        action = "presented"
+        saved_path: Path | None = None
+        if interactive:
+            action = _prompt_action(bool(p.draft and p.draft.strip()))
+            if action == "quit":
+                stop.set()
                 _append_session_record(session_path, _session_record(p, "quit", None))
                 quit_early = True
                 processed += 1
@@ -917,6 +1166,68 @@ def main(argv: list[str] | None = None) -> int:
     )
     anon_parser.set_defaults(func=_cmd_anonymize_emails)
 
+    def _add_process_args(p: argparse.ArgumentParser) -> None:
+        """Arguments shared by ``process`` and ``process-old``."""
+        p.add_argument("mbox_path", type=str, help="Path to an .mbox file")
+        p.add_argument(
+            "--limit",
+            type=int,
+            default=10,
+            help="Maximum number of emails to process (default: 10)",
+        )
+        p.add_argument(
+            "--anonymizer",
+            choices=["regex", "combined", "coref"],
+            default="combined",
+            help="Anonymization strategy for escalations (default: combined = regex + NER)",
+        )
+        p.add_argument(
+            "--task",
+            type=str,
+            default=DEFAULT_PROCESS_TASK,
+            help="Task instruction sent to Claude for escalated emails",
+        )
+        p.add_argument(
+            "--config",
+            type=str,
+            default=None,
+            help="Path to the router config (default: configs/router.yaml)",
+        )
+        p.add_argument(
+            "--approved-dir",
+            type=str,
+            default="data/approved_drafts",
+            help="Directory for approved drafts (default: data/approved_drafts)",
+        )
+        p.add_argument(
+            "--sessions-dir",
+            type=str,
+            default="logs/sessions",
+            help="Directory for per-run decision logs (default: logs/sessions)",
+        )
+        p.add_argument(
+            "--max-chars",
+            type=int,
+            default=800,
+            help="Truncate the displayed original message to this many chars (default: 800)",
+        )
+        p.add_argument(
+            "--no-input",
+            action="store_true",
+            help="Present and log without prompting (no approve/reject/edit).",
+        )
+        p.add_argument(
+            "--shuffle",
+            action="store_true",
+            help="Randomly sample emails from the mbox instead of taking the first N.",
+        )
+        p.add_argument(
+            "--seed",
+            type=int,
+            default=None,
+            help="Random seed for --shuffle (omit for nondeterministic).",
+        )
+
     process_parser = subparsers.add_parser(
         "process",
         help="Full pipeline: triage, score sensitivity, delegate escalations, review.",
@@ -925,71 +1236,27 @@ def main(argv: list[str] | None = None) -> int:
             "scored for sensitivity; escalated emails are anonymized, sent to "
             "Claude, and the reply is rehydrated locally. Every email is presented "
             "with its classification, escalation decision, and draft (tagged "
-            "'local' or 'Claude'), then you approve / edit / reject it. Approved "
-            "drafts are written to data/approved_drafts/ and every decision is "
-            "logged to logs/sessions/<timestamp>.jsonl. Nothing is ever sent."
+            "'local' or 'Claude'), then you approve / edit / reject it. Processing "
+            "runs on a background thread, so reviewing the first email never "
+            "waits for the rest of the batch. Approved drafts are written to "
+            "data/approved_drafts/ and every decision is logged to "
+            "logs/sessions/<timestamp>.jsonl. Nothing is ever sent."
         ),
     )
-    process_parser.add_argument("mbox_path", type=str, help="Path to an .mbox file")
-    process_parser.add_argument(
-        "--limit",
-        type=int,
-        default=10,
-        help="Maximum number of emails to process (default: 10)",
-    )
-    process_parser.add_argument(
-        "--anonymizer",
-        choices=["regex", "combined", "coref"],
-        default="combined",
-        help="Anonymization strategy for escalations (default: combined = regex + NER)",
-    )
-    process_parser.add_argument(
-        "--task",
-        type=str,
-        default=DEFAULT_PROCESS_TASK,
-        help="Task instruction sent to Claude for escalated emails",
-    )
-    process_parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to the router config (default: configs/router.yaml)",
-    )
-    process_parser.add_argument(
-        "--approved-dir",
-        type=str,
-        default="data/approved_drafts",
-        help="Directory for approved drafts (default: data/approved_drafts)",
-    )
-    process_parser.add_argument(
-        "--sessions-dir",
-        type=str,
-        default="logs/sessions",
-        help="Directory for per-run decision logs (default: logs/sessions)",
-    )
-    process_parser.add_argument(
-        "--max-chars",
-        type=int,
-        default=800,
-        help="Truncate the displayed original message to this many chars (default: 800)",
-    )
-    process_parser.add_argument(
-        "--no-input",
-        action="store_true",
-        help="Present and log without prompting (no approve/reject/edit).",
-    )
-    process_parser.add_argument(
-        "--shuffle",
-        action="store_true",
-        help="Randomly sample emails from the mbox instead of taking the first N.",
-    )
-    process_parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Random seed for --shuffle (omit for nondeterministic).",
-    )
+    _add_process_args(process_parser)
     process_parser.set_defaults(func=_cmd_process)
+
+    process_old_parser = subparsers.add_parser(
+        "process-old",
+        help="Like `process`, but fully sequential (process one, review one).",
+        description=(
+            "The original sequential version of `process`: each email is triaged, "
+            "scored, and (if escalated) delegated in the foreground, then reviewed, "
+            "before the next email starts. Same flags, same output, same logs."
+        ),
+    )
+    _add_process_args(process_old_parser)
+    process_old_parser.set_defaults(func=_cmd_process_old)
 
     args = parser.parse_args(argv)
     return args.func(args)

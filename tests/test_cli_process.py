@@ -11,6 +11,9 @@ rehydrate round-trip is checked without a model.
 from __future__ import annotations
 
 import json
+import logging
+import queue
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,7 @@ from src.cli import (
     ProcessedEmail,
     _build_processed,
     _email_payload,
+    _process_worker,
     _safe_stem,
     _save_approved_draft,
     _session_record,
@@ -59,6 +63,16 @@ class _BoomClaude:
 
     def delegate(self, *a: Any, **k: Any) -> str:
         raise RuntimeError("api exploded")
+
+
+class _FakeScorer:
+    """Escalates exactly the email ids it was given."""
+
+    def __init__(self, escalate_ids: set[str] | None = None) -> None:
+        self.escalate_ids = escalate_ids or set()
+
+    def score(self, email: Email, result: TriageResult) -> EscalationDecision:
+        return _decision(escalate=email.id in self.escalate_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -253,3 +267,130 @@ def test_session_record_no_saved_path() -> None:
     rec = _session_record(_processed("d"), action="reject", saved_path=None)
     assert rec["approved_path"] is None
     assert rec["action"] == "reject"
+
+
+# ---------------------------------------------------------------------------
+# _process_worker  (background half of the `process` command)
+# ---------------------------------------------------------------------------
+#
+# The worker is run synchronously here — it's a plain function; the `process`
+# command is what puts it on a thread. Order, the None sentinel, failure
+# passthrough, and the stop event are what matter.
+
+
+def _run_worker(
+    emails: list[Email],
+    *,
+    stop: threading.Event | None = None,
+    scorer: _FakeScorer | None = None,
+) -> list[Any]:
+    outcomes: queue.Queue = queue.Queue()
+    _process_worker(
+        emails,
+        outcomes,
+        stop or threading.Event(),
+        ollama_client=None,  # triage is monkeypatched; the client is unused
+        scorer=scorer or _FakeScorer(),
+        anonymizer=_FakeAnonymizer(),
+        task="reply",
+    )
+    items = []
+    while not outcomes.empty():
+        items.append(outcomes.get_nowait())
+    return items
+
+
+def test_worker_queues_outcomes_in_order_with_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("src.cli.triage", lambda email, client: _result())
+    emails = [_email(email_id=f"<{n}@host>") for n in range(3)]
+    items = _run_worker(emails)
+    assert len(items) == 4
+    assert [it.email.id for it in items[:3]] == [e.id for e in emails]
+    assert all(it.processed is not None and it.error is None for it in items[:3])
+    assert items[3] is None
+
+
+def test_worker_passes_triage_failure_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(email: Email, client: Any) -> TriageResult:
+        raise RuntimeError("ollama down")
+
+    monkeypatch.setattr("src.cli.triage", _boom)
+    items = _run_worker([_email()])
+    assert items[0].processed is None
+    assert isinstance(items[0].error, RuntimeError)
+    assert items[1] is None
+
+
+def test_worker_stop_event_skips_remaining_emails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("src.cli.triage", lambda email, client: _result())
+    stop = threading.Event()
+    stop.set()
+    items = _run_worker([_email(), _email()], stop=stop)
+    assert items == [None]  # sentinel only — nothing was processed
+
+
+def test_worker_delegates_escalations(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.cli.triage", lambda email, client: _result())
+    monkeypatch.setattr("src.cli.ClaudeClient", _EchoClaude)
+    email = _email(body="contact alice@example.com please", email_id="<1@h>")
+    items = _run_worker([email], scorer=_FakeScorer(escalate_ids={"<1@h>"}))
+    p = items[0].processed
+    assert p.claude_used is True
+    assert p.provenance == "Claude"
+    assert "alice@example.com" in p.draft
+
+
+def test_worker_routes_rehydrate_warning_into_notes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stray placeholder in Claude's reply must not write to stderr from the
+    worker thread (it would land inside the reviewer's prompt) — the warning
+    travels through the queue as a note on the email that produced it."""
+
+    class _StrayPlaceholderClaude:
+        model = "fake-claude"
+
+        def delegate(self, anonymized_email: str, anonymized_thread: Any, task: str) -> str:
+            return "Will do — looping in Ghost_P9."
+
+    monkeypatch.setattr("src.cli.triage", lambda email, client: _result())
+    monkeypatch.setattr("src.cli.ClaudeClient", _StrayPlaceholderClaude)
+    emails = [_email(email_id="<1@h>"), _email(email_id="<2@h>")]
+    items = _run_worker(emails, scorer=_FakeScorer(escalate_ids={"<2@h>"}))
+    assert items[0].notes == []  # not escalated — no rehydration, no warning
+    assert any("Ghost_P9" in n for n in items[1].notes)
+
+
+def test_worker_restores_src_logger(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.cli.triage", lambda email, client: _result())
+    src_logger = logging.getLogger("src")
+    handlers_before = list(src_logger.handlers)
+    propagate_before = src_logger.propagate
+    _run_worker([_email()])
+    assert src_logger.handlers == handlers_before
+    assert src_logger.propagate == propagate_before
+
+
+def test_worker_notes_claude_init_failure_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _no_key() -> Any:
+        raise RuntimeError("no api key")
+
+    monkeypatch.setattr("src.cli.triage", lambda email, client: _result())
+    monkeypatch.setattr("src.cli.ClaudeClient", _no_key)
+    emails = [_email(email_id="<1@h>"), _email(email_id="<2@h>")]
+    items = _run_worker(emails, scorer=_FakeScorer(escalate_ids={"<1@h>", "<2@h>"}))
+    first, second = items[0], items[1]
+    assert any("Claude client unavailable" in n for n in first.notes)
+    assert second.notes == []  # warned once, not per email
+    # Both fall back to the local draft.
+    for it in (first, second):
+        assert it.processed.provenance == "local"
+        assert it.processed.error and "no Claude client" in it.processed.error

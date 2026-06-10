@@ -121,8 +121,16 @@ then approve / edit / reject. Approved drafts are written to
 Escalations need `ANTHROPIC_API_KEY` (from `.env`); a run with nothing to
 escalate never calls Claude.
 
+Processing runs on a background thread: while you review the first email, the
+rest of the batch is already being triaged and delegated, so each review starts
+as soon as that email is ready. `process-old` is the original fully sequential
+version (process one, review one, repeat) with the same flags and output.
+
 ### Interactive review of the first 10
 python -m src.cli process data/dev_corpus.mbox --limit 10
+
+### Sequential version (no background processing)
+python -m src.cli process-old data/dev_corpus.mbox --limit 10
 
 ### Present + log only, no approve/reject prompts (good for a quick look or CI)
 python -m src.cli process data/dev_corpus.mbox --limit 3 --no-input
