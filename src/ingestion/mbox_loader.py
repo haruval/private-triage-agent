@@ -208,6 +208,29 @@ def _stable_id(msg: Message) -> str:
 # ---------------------------------------------------------------------------
 
 
+def email_from_message(msg: Message) -> Email:
+    """Convert one parsed RFC-5322 message into an Email record.
+
+    Shared by the mbox and IMAP loaders so every ingestion source yields the
+    same shape. Synthesizes a content-hash id when Message-ID is missing;
+    dedupe is the caller's job.
+    """
+    msg_id = (msg.get("Message-ID") or "").strip()
+    if not msg_id:
+        msg_id = _stable_id(msg)
+    _, from_addr = parseaddr(msg.get("From") or "")
+    return Email(
+        id=msg_id,
+        from_addr=from_addr,
+        to_addrs=_parse_addr_list(msg.get("To")),
+        subject=_decode_header_value(msg.get("Subject")),
+        date=_parse_date(msg.get("Date")),
+        body_plain=_extract_body(msg),
+        thread_id=_thread_id(msg),
+        headers={k: _decode_header_value(v) for k, v in msg.items()},
+    )
+
+
 def load_mbox(path: str | Path) -> Iterator[Email]:
     """Yield Email records from an mbox file, deduped by Message-ID.
 
@@ -219,24 +242,11 @@ def load_mbox(path: str | Path) -> Iterator[Email]:
     try:
         for raw in box:
             try:
-                msg_id = (raw.get("Message-ID") or "").strip()
-                if not msg_id:
-                    msg_id = _stable_id(raw)
-                if msg_id in seen_ids:
+                email = email_from_message(raw)
+                if email.id in seen_ids:
                     continue
-                seen_ids.add(msg_id)
-
-                _, from_addr = parseaddr(raw.get("From") or "")
-                yield Email(
-                    id=msg_id,
-                    from_addr=from_addr,
-                    to_addrs=_parse_addr_list(raw.get("To")),
-                    subject=_decode_header_value(raw.get("Subject")),
-                    date=_parse_date(raw.get("Date")),
-                    body_plain=_extract_body(raw),
-                    thread_id=_thread_id(raw),
-                    headers={k: _decode_header_value(v) for k, v in raw.items()},
-                )
+                seen_ids.add(email.id)
+                yield email
             except Exception:
                 logger.exception("Failed to parse message; skipping")
                 continue

@@ -5,6 +5,9 @@ Usage:
     python -m src.cli anonymize-emails data/dev_corpus.mbox --limit 5
     python -m src.cli process          data/dev_corpus.mbox --limit 10
     python -m src.cli process-old      data/dev_corpus.mbox --limit 10
+    python -m src.cli start            data/inbox
+    python -m src.cli start-imap       --days 7
+    python -m src.cli review
 
 ``triage-emails`` runs the local model and prints a result panel per email.
 ``anonymize-emails`` previews exactly what would leave the box on escalation.
@@ -13,9 +16,20 @@ escalated emails, anonymize, delegate to Claude, and rehydrate the reply →
 present everything for human approve/reject/edit. Processing runs on a
 background thread, so you review the first email while the rest are still
 being triaged and delegated; ``process-old`` is the original fully sequential
-version (process one, review one, repeat). Nothing is ever sent
-automatically; approved drafts are written to ``data/approved_drafts/`` and
-every decision is appended to ``logs/sessions/<timestamp>.jsonl``.
+version (process one, review one, repeat). Both accept ``--source imap`` to
+read unread mail over a read-only IMAP connection instead of an mbox file.
+
+``start`` / ``start-imap`` / ``review`` split the pipeline in two: ``start``
+processes every new email from a folder of mbox files (``start-imap``: from
+the IMAP account) into a persistent queue under ``data/queue/``, ranks the
+batch by importance with one anonymized Claude call, and prints a summary
+table sorted most-important-first; ``review`` then walks the unreviewed
+queue interactively. The eventual single entry point will ask first-run
+whether to use local mbox files or IMAP — for now they are separate commands.
+
+Nothing is ever sent automatically; approved drafts are written to
+``data/approved_drafts/`` and every decision is appended to
+``logs/sessions/<timestamp>.jsonl``.
 """
 
 from __future__ import annotations
@@ -39,14 +53,26 @@ from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.prompt import Prompt
+from rich.table import Table
 from rich.text import Text
 
+from src import review_queue
 from src.anonymize.ner_anonymizer import CombinedAnonymizer
 from src.anonymize.regex_anonymizer import RegexAnonymizer
 from src.anonymize.rehydrate import rehydrate
 from src.delegate.claude_client import ClaudeClient
+from src.ingestion.imap_loader import load_imap_unread
 from src.ingestion.mbox_loader import Email, load_mbox
+from src.router.importance import EmailDigest, rank_importance
 from src.router.sensitivity_scorer import EscalationDecision, SensitivityScorer
 from src.triage.classifier import TriageResult, triage
 from src.triage.ollama_client import OllamaClient
@@ -679,31 +705,76 @@ def _append_session_record(session_path: Path, record: dict[str, Any]) -> None:
         f.write(json.dumps(record) + "\n")
 
 
+def _limit_and_shuffle(
+    all_emails: list[Email], limit: int, shuffle: bool, seed: int | None
+) -> list[Email]:
+    """First N of a list, or an (optionally seeded) random N."""
+    if not shuffle:
+        return all_emails[:limit]
+    rng = random.Random(seed)
+    if limit < len(all_emails):
+        chosen = rng.sample(all_emails, limit)
+    else:
+        chosen = list(all_emails)
+        rng.shuffle(chosen)
+    seed_note = f", seed {seed}" if seed is not None else ""
+    console.print(
+        f"[dim](shuffled {len(chosen)} of {len(all_emails)} emails{seed_note})[/]"
+    )
+    return chosen
+
+
 def _select_emails(
     mbox_path: Path, limit: int, shuffle: bool, seed: int | None
 ) -> list[Email]:
     """Pick emails from the mbox: first N, or a (optionally seeded) random N."""
     if shuffle:
-        all_emails = list(load_mbox(mbox_path))
-        rng = random.Random(seed)
-        if limit < len(all_emails):
-            chosen = rng.sample(all_emails, limit)
-        else:
-            chosen = all_emails
-            rng.shuffle(chosen)
-        seed_note = f", seed {seed}" if seed is not None else ""
-        console.print(
-            f"[dim](shuffled {len(chosen)} of {len(all_emails)} emails{seed_note})[/]"
-        )
-        return chosen
+        return _limit_and_shuffle(list(load_mbox(mbox_path)), limit, shuffle, seed)
     return list(islice(load_mbox(mbox_path), limit))
+
+
+def _validate_source_args(args: argparse.Namespace) -> bool:
+    """Check the mbox/imap source flags; print the problem and return False."""
+    if args.source == "imap":
+        return True
+    if not args.mbox_path:
+        console.print("[red]mbox_path is required with --source mbox[/]")
+        return False
+    if not Path(args.mbox_path).exists():
+        console.print(f"[red]mbox not found:[/] {args.mbox_path}")
+        return False
+    return True
+
+
+def _source_label(args: argparse.Namespace) -> str:
+    if args.source == "imap":
+        return f"imap (unread, last {args.days} days)"
+    return str(args.mbox_path)
+
+
+def _collect_process_emails(args: argparse.Namespace) -> list[Email] | None:
+    """Load the emails for `process`/`process-old` from mbox or IMAP.
+
+    Returns None after printing an error so the caller can exit 1.
+    """
+    if args.source == "imap":
+        try:
+            with console.status(
+                f"[cyan]Fetching unread (last {args.days} days) via IMAP…",
+                spinner="dots",
+            ):
+                all_emails = load_imap_unread(days=args.days)
+        except Exception as exc:
+            console.print(f"[red]IMAP error:[/] {exc}")
+            return None
+        console.print(f"[dim]IMAP returned {len(all_emails)} unread email(s)[/]")
+        return _limit_and_shuffle(all_emails, args.limit, args.shuffle, args.seed)
+    return _select_emails(Path(args.mbox_path), args.limit, args.shuffle, args.seed)
 
 
 def _cmd_process_old(args: argparse.Namespace) -> int:
     """Sequential pipeline: process one email, review it, then move on."""
-    mbox_path = Path(args.mbox_path)
-    if not mbox_path.exists():
-        console.print(f"[red]mbox not found:[/] {mbox_path}")
+    if not _validate_source_args(args):
         return 1
 
     try:
@@ -726,7 +797,7 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
     claude_client: ClaudeClient | None = None
 
     console.print(
-        f"[dim]Processing[/] [bold]{mbox_path}[/] "
+        f"[dim]Processing[/] [bold]{_source_label(args)}[/] "
         f"[dim](limit {args.limit}, anonymizer {anon_label}, "
         f"triage {ollama_client.model})[/]"
     )
@@ -735,7 +806,9 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
     console.print(f"[dim]session log → {session_path}[/]")
     console.print()
 
-    emails = _select_emails(mbox_path, args.limit, args.shuffle, args.seed)
+    emails = _collect_process_emails(args)
+    if emails is None:
+        return 1
 
     processed = failed = escalated = approved = 0
     quit_early = False
@@ -942,9 +1015,7 @@ def _cmd_process(args: argparse.Namespace) -> int:
     """Pipelined version: a worker thread processes every email up front
     while the foreground loop presents each one for review as soon as it is
     ready — reviewing email 1 never waits for emails 2..N to finish."""
-    mbox_path = Path(args.mbox_path)
-    if not mbox_path.exists():
-        console.print(f"[red]mbox not found:[/] {mbox_path}")
+    if not _validate_source_args(args):
         return 1
 
     try:
@@ -966,7 +1037,7 @@ def _cmd_process(args: argparse.Namespace) -> int:
     interactive = sys.stdin.isatty() and not args.no_input
 
     console.print(
-        f"[dim]Processing[/] [bold]{mbox_path}[/] "
+        f"[dim]Processing[/] [bold]{_source_label(args)}[/] "
         f"[dim](limit {args.limit}, anonymizer {anon_label}, "
         f"triage {ollama_client.model}, background processing)[/]"
     )
@@ -975,7 +1046,9 @@ def _cmd_process(args: argparse.Namespace) -> int:
     console.print(f"[dim]session log → {session_path}[/]")
     console.print()
 
-    emails = _select_emails(mbox_path, args.limit, args.shuffle, args.seed)
+    emails = _collect_process_emails(args)
+    if emails is None:
+        return 1
 
     outcomes: queue.Queue[_ProcessOutcome | None] = queue.Queue()
     stop = threading.Event()
@@ -1066,6 +1139,367 @@ def _cmd_process(args: argparse.Namespace) -> int:
     )
     console.print(f"[dim]Decisions logged to[/] {session_path}")
     return 0 if failed == 0 else 2
+
+
+# ---------------------------------------------------------------------------
+# Subcommands: start / start-imap / review  (queue-based pipeline)
+# ---------------------------------------------------------------------------
+
+
+def _processed_from_record(rec: review_queue.QueueRecord) -> ProcessedEmail:
+    """Rebuild the panel-ready ProcessedEmail from a stored queue record."""
+    return ProcessedEmail(
+        email=rec.email,
+        result=rec.result,
+        decision=rec.decision,
+        draft=rec.draft,
+        provenance=rec.provenance,
+        mapping=rec.mapping,
+        claude_used=rec.claude_used,
+        error=rec.error,
+    )
+
+
+def _format_importance(importance: float) -> str:
+    return f"{importance:.0f}" if float(importance).is_integer() else f"{importance:.1f}"
+
+
+def _print_queue_summary(pending: list[review_queue.QueueRecord]) -> None:
+    """Rich table of everything awaiting review, most important first."""
+    if not pending:
+        console.print("[green]Review queue is empty — nothing awaiting review.[/]")
+        return
+    table = Table(
+        title=f"Review queue — {len(pending)} email(s) awaiting review",
+        title_justify="left",
+        show_lines=True,
+    )
+    table.add_column("#", justify="right", style="dim", width=3)
+    table.add_column("imp", justify="right", width=4)
+    table.add_column("email", overflow="fold")
+
+    for i, rec in enumerate(pending, start=1):
+        imp = rec.importance
+        imp_style = "bold red" if imp >= 8 else "yellow" if imp >= 6 else "dim"
+
+        details = Text()
+        details.append(rec.email.subject or "(no subject)", style="bold")
+        details.append("\n")
+        details.append(f"from {rec.email.from_addr or '(unknown)'}", style="dim")
+        details.append("  •  ", style="dim")
+        details.append(
+            rec.result.category,
+            style=CATEGORY_STYLE.get(rec.result.category, "white"),
+        )
+        details.append("  •  draft: ", style="dim")
+        details.append(
+            rec.provenance, style=PROVENANCE_STYLE.get(rec.provenance, "white")
+        )
+        if rec.decision.escalate:
+            details.append("  •  escalated", style="red")
+        details.append("\n")
+        details.append(_truncate(" ".join(rec.result.summary.split()), 220))
+        for item in rec.result.extracted_action_items[:3]:
+            details.append("\n  • ", style="dim")
+            details.append(_truncate(" ".join(item.split()), 110))
+        if rec.importance_reason:
+            details.append("\n")
+            details.append(
+                f"({_truncate(rec.importance_reason, 110)})", style="dim italic"
+            )
+
+        table.add_row(str(i), Text(_format_importance(imp), style=imp_style), details)
+    console.print(table)
+
+
+def _run_start_pipeline(
+    emails: list[Email],
+    sources: dict[str, str],
+    args: argparse.Namespace,
+    queue_dir: Path,
+) -> int:
+    """Process ``emails`` into the queue with a progress bar, rank, summarize.
+
+    The shared back half of `start` and `start-imap`: background-worker
+    processing with a spinner + progress display, one anonymized Claude call
+    to rank the batch by importance, append everything to the queue, then
+    print the pending-review summary table (newly processed plus anything
+    older that was never reviewed).
+    """
+    failed = 0
+    done: list[_ProcessOutcome] = []
+
+    if emails:
+        try:
+            scorer = SensitivityScorer(config_path=args.config)
+        except (FileNotFoundError, ValueError) as exc:
+            console.print(f"[red]router config error:[/] {exc}")
+            return 1
+        ollama_client = OllamaClient()
+        with console.status(
+            f"[cyan]Loading anonymizer ({args.anonymizer})…", spinner="dots"
+        ):
+            anonymizer, anon_label = _build_anonymizer(args.anonymizer)
+        console.print(
+            f"[dim]Processing {len(emails)} email(s) "
+            f"(anonymizer {anon_label}, triage {ollama_client.model})[/]"
+        )
+
+        outcomes: queue.Queue[_ProcessOutcome | None] = queue.Queue()
+        stop = threading.Event()
+        worker = threading.Thread(
+            target=_process_worker,
+            args=(emails, outcomes, stop),
+            kwargs={
+                "ollama_client": ollama_client,
+                "scorer": scorer,
+                "anonymizer": anonymizer,
+                "task": args.task,
+            },
+            daemon=True,
+        )
+        worker.start()
+
+        progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        )
+        with progress:
+            task_id = progress.add_task("Processing…", total=len(emails))
+            while True:
+                item = outcomes.get()
+                if item is None:
+                    break
+                for note in item.notes:
+                    progress.console.print(Text(note, style="yellow"))
+                subject_preview = (item.email.subject or "(no subject)")[:48]
+                if item.processed is None:
+                    failed += 1
+                    progress.console.print(
+                        Text(
+                            f"failed: {subject_preview} "
+                            f"({type(item.error).__name__}: {item.error})",
+                            style="red",
+                        )
+                    )
+                else:
+                    done.append(item)
+                progress.update(
+                    task_id, advance=1, description=f"[cyan]{subject_preview}"
+                )
+            progress.update(task_id, description="[green]processing done")
+
+        if done:
+            digests = [
+                EmailDigest(
+                    email_id=o.email.id,
+                    subject=o.email.subject or "",
+                    summary=o.processed.result.summary,
+                    action_items=tuple(o.processed.result.extracted_action_items),
+                    category=o.processed.result.category,
+                    escalate=o.processed.decision.escalate,
+                    escalation_score=o.processed.decision.score,
+                )
+                for o in done
+            ]
+            claude_client: ClaudeClient | None = None
+            try:
+                # The ranking reply is ~40 output tokens per email; the default
+                # 1024 budget truncates the JSON array on big batches.
+                claude_client = ClaudeClient(
+                    max_tokens=min(8192, max(1024, 64 * len(digests)))
+                )
+            except Exception as exc:
+                console.print(
+                    Text(f"Claude unavailable for ranking ({exc})", style="yellow")
+                )
+            with console.status(
+                "[cyan]Ranking importance (one anonymized Claude call)…",
+                spinner="dots",
+            ):
+                ranking = rank_importance(
+                    digests, claude_client=claude_client, anonymizer=anonymizer
+                )
+
+            now = datetime.now().astimezone().isoformat()
+            new_records = []
+            for o in done:
+                p = o.processed
+                ranked = ranking.scores[o.email.id]
+                new_records.append(
+                    review_queue.QueueRecord(
+                        email=o.email,
+                        result=p.result,
+                        decision=p.decision,
+                        draft=p.draft,
+                        provenance=p.provenance,
+                        mapping=p.mapping,
+                        claude_used=p.claude_used,
+                        error=p.error,
+                        importance=ranked.importance,
+                        importance_reason=ranked.reason,
+                        ranked_by=ranking.ranked_by,
+                        source=sources.get(o.email.id, ""),
+                        processed_at=now,
+                    )
+                )
+            review_queue.append_records(queue_dir, new_records)
+            console.print(
+                f"[dim]Importance ranked by {ranking.ranked_by}  •  queue → "
+                f"{review_queue.processed_path(queue_dir)}[/]"
+            )
+            console.print()
+
+    pending = review_queue.pending_records(queue_dir)
+    _print_queue_summary(pending)
+    console.rule(style="dim")
+    console.print(
+        f"Processed [bold]{len(done)}[/] new  •  "
+        f"[red]{failed}[/] failed  •  "
+        f"[yellow]{len(pending)}[/] awaiting review"
+    )
+    if pending:
+        console.print(
+            "[dim]Run[/] [bold]python -m src.cli review[/] "
+            "[dim]to approve / edit / reject drafts.[/]"
+        )
+    return 0 if failed == 0 else 2
+
+
+def _cmd_start(args: argparse.Namespace) -> int:
+    """Process every new email from a folder of .mbox files into the queue."""
+    folder = Path(args.folder)
+    if not folder.is_dir():
+        console.print(f"[red]not a folder:[/] {folder}")
+        return 1
+    mbox_files = sorted(folder.glob("*.mbox"))
+    if not mbox_files:
+        console.print(f"[red]no .mbox files in[/] {folder}")
+        return 1
+
+    queue_dir = Path(args.queue_dir)
+    already = review_queue.processed_ids(queue_dir)
+
+    emails: list[Email] = []
+    sources: dict[str, str] = {}
+    skipped = 0
+    with console.status("[cyan]Scanning mbox files…", spinner="dots"):
+        for mbox_file in mbox_files:
+            for email in load_mbox(mbox_file):
+                if email.id in already or email.id in sources:
+                    skipped += 1
+                    continue
+                sources[email.id] = f"mbox:{mbox_file.name}"
+                emails.append(email)
+    if args.limit is not None:
+        emails = emails[: args.limit]
+
+    files_noun = "file" if len(mbox_files) == 1 else "files"
+    console.print(
+        f"[dim]{len(mbox_files)} mbox {files_noun} in [bold]{folder}[/bold] — "
+        f"{len(emails)} new email(s) to process, "
+        f"{skipped} already processed or duplicate[/]"
+    )
+    return _run_start_pipeline(emails, sources, args, queue_dir)
+
+
+def _cmd_start_imap(args: argparse.Namespace) -> int:
+    """Process unread IMAP mail into the queue (read-only connection)."""
+    queue_dir = Path(args.queue_dir)
+    try:
+        with console.status(
+            f"[cyan]Fetching unread (last {args.days} days) via IMAP…",
+            spinner="dots",
+        ):
+            fetched = load_imap_unread(days=args.days)
+    except Exception as exc:
+        console.print(f"[red]IMAP error:[/] {exc}")
+        return 1
+
+    already = review_queue.processed_ids(queue_dir)
+    emails = [e for e in fetched if e.id not in already]
+    if args.limit is not None:
+        emails = emails[: args.limit]
+    sources = {e.id: "imap" for e in emails}
+    console.print(
+        f"[dim]IMAP returned {len(fetched)} unread email(s); "
+        f"{len(emails)} new to process[/]"
+    )
+    return _run_start_pipeline(emails, sources, args, queue_dir)
+
+
+def _cmd_review(args: argparse.Namespace) -> int:
+    """Interactively review every queued email not yet reviewed."""
+    queue_dir = Path(args.queue_dir)
+    pending = review_queue.pending_records(queue_dir)
+    if not pending:
+        console.print("[green]Nothing to review — the queue is empty.[/]")
+        console.print(
+            "[dim]Run `python -m src.cli start <folder>` (or `start-imap`) "
+            "to process new mail.[/]"
+        )
+        return 0
+
+    out_dir = Path(args.approved_dir)
+    session_path = (
+        Path(args.sessions_dir) / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    )
+    console.print(
+        f"[dim]{len(pending)} email(s) to review, most important first  •  "
+        f"session log → {session_path}[/]"
+    )
+    console.print()
+
+    reviewed = approved = 0
+    quit_early = False
+    for i, rec in enumerate(pending, start=1):
+        p = _processed_from_record(rec)
+        header = Text(f"[{i}/{len(pending)}]  ", style="bold")
+        header.append(f"importance {_format_importance(rec.importance)}", style="bold cyan")
+        if rec.importance_reason:
+            header.append(f" — {rec.importance_reason}", style="dim")
+        console.print(header)
+        console.print(_render_process_panel(p, max_body_chars=args.max_chars))
+
+        try:
+            action = _prompt_action(bool(p.draft and p.draft.strip()))
+        except EOFError:  # piped stdin ran dry — treat like quit
+            action = "quit"
+        if action == "quit":
+            _append_session_record(session_path, _session_record(p, "quit", None))
+            quit_early = True
+            break
+
+        saved_path: Path | None = None
+        draft_to_save = p.draft or ""
+        if action == "edit":
+            draft_to_save = _edit_draft(draft_to_save)
+        if action in ("approve", "edit") and draft_to_save.strip():
+            saved_path = _save_approved_draft(p, draft_to_save, out_dir)
+            approved += 1
+            console.print(f"  [green]saved →[/] {saved_path}")
+        elif action == "reject":
+            console.print("  [dim]rejected — nothing saved[/]")
+
+        review_queue.append_reviewed(queue_dir, rec.email.id, action, saved_path)
+        _append_session_record(session_path, _session_record(p, action, saved_path))
+        reviewed += 1
+        console.print()
+
+    remaining = len(pending) - reviewed
+    console.rule(style="dim")
+    note = " (stopped early)" if quit_early else ""
+    console.print(
+        f"Reviewed [bold]{reviewed}[/]{note}  •  "
+        f"[green]{approved}[/] approved  •  "
+        f"[yellow]{remaining}[/] still pending"
+    )
+    console.print(f"[dim]Decisions logged to[/] {session_path}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1168,7 +1602,29 @@ def main(argv: list[str] | None = None) -> int:
 
     def _add_process_args(p: argparse.ArgumentParser) -> None:
         """Arguments shared by ``process`` and ``process-old``."""
-        p.add_argument("mbox_path", type=str, help="Path to an .mbox file")
+        p.add_argument(
+            "mbox_path",
+            type=str,
+            nargs="?",
+            default=None,
+            help="Path to an .mbox file (required unless --source imap)",
+        )
+        p.add_argument(
+            "--source",
+            choices=["mbox", "imap"],
+            default="mbox",
+            help=(
+                "Where to read email from: an .mbox file, or unread mail over a "
+                "read-only IMAP connection configured via IMAP_HOST / IMAP_USER / "
+                "IMAP_PASS / IMAP_FOLDER (default: mbox)"
+            ),
+        )
+        p.add_argument(
+            "--days",
+            type=int,
+            default=7,
+            help="With --source imap: fetch unread from the last N days (default: 7)",
+        )
         p.add_argument(
             "--limit",
             type=int,
@@ -1257,6 +1713,118 @@ def main(argv: list[str] | None = None) -> int:
     )
     _add_process_args(process_old_parser)
     process_old_parser.set_defaults(func=_cmd_process_old)
+
+    def _add_pipeline_args(p: argparse.ArgumentParser) -> None:
+        """Arguments shared by ``start`` and ``start-imap``."""
+        p.add_argument(
+            "--limit",
+            type=int,
+            default=None,
+            help="Process at most N new emails (default: all)",
+        )
+        p.add_argument(
+            "--anonymizer",
+            choices=["regex", "combined", "coref"],
+            default="combined",
+            help="Anonymization strategy for escalations (default: combined = regex + NER)",
+        )
+        p.add_argument(
+            "--task",
+            type=str,
+            default=DEFAULT_PROCESS_TASK,
+            help="Task instruction sent to Claude for escalated emails",
+        )
+        p.add_argument(
+            "--config",
+            type=str,
+            default=None,
+            help="Path to the router config (default: configs/router.yaml)",
+        )
+        p.add_argument(
+            "--queue-dir",
+            type=str,
+            default=str(review_queue.DEFAULT_QUEUE_DIR),
+            help="Directory for the processed/reviewed ledgers (default: data/queue)",
+        )
+
+    start_parser = subparsers.add_parser(
+        "start",
+        help="Process all new emails from a folder of .mbox files into the review queue.",
+        description=(
+            "Scan a folder for .mbox files and process every email that isn't "
+            "already in the queue: triage locally, score sensitivity, delegate "
+            "escalations to Claude (anonymized, then rehydrated). The batch is "
+            "ranked by importance with one anonymized Claude call and a summary "
+            "table is printed, most important first. Review the queue afterwards "
+            "with `review`. Nothing is ever sent."
+        ),
+    )
+    start_parser.add_argument(
+        "folder",
+        type=str,
+        nargs="?",
+        default="data/inbox",
+        help="Folder containing .mbox files (default: data/inbox)",
+    )
+    _add_pipeline_args(start_parser)
+    start_parser.set_defaults(func=_cmd_start)
+
+    start_imap_parser = subparsers.add_parser(
+        "start-imap",
+        help="Process unread IMAP mail (read-only) into the review queue.",
+        description=(
+            "Fetch unread messages from the last N days over a read-only IMAP "
+            "connection (configured via IMAP_HOST, IMAP_USER, IMAP_PASS, and "
+            "optionally IMAP_FOLDER — use an app-specific password, never the "
+            "main account password), then process and rank them exactly like "
+            "`start`. Never marks read, never deletes, never sends."
+        ),
+    )
+    start_imap_parser.add_argument(
+        "--days",
+        type=int,
+        default=7,
+        help="Fetch unread from the last N days (default: 7)",
+    )
+    _add_pipeline_args(start_imap_parser)
+    start_imap_parser.set_defaults(func=_cmd_start_imap)
+
+    review_parser = subparsers.add_parser(
+        "review",
+        help="Interactively review queued emails, most important first.",
+        description=(
+            "Walk every processed-but-unreviewed email in the queue, most "
+            "important first, and approve / edit / reject each draft. Approved "
+            "drafts are written to data/approved_drafts/; every decision is "
+            "appended to the reviewed ledger and the session log. Quit anytime "
+            "with q — the rest stays queued."
+        ),
+    )
+    review_parser.add_argument(
+        "--approved-dir",
+        type=str,
+        default="data/approved_drafts",
+        help="Directory for approved drafts (default: data/approved_drafts)",
+    )
+    review_parser.add_argument(
+        "--sessions-dir",
+        type=str,
+        default="logs/sessions",
+        help="Directory for per-run decision logs (default: logs/sessions)",
+    )
+    review_parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=800,
+        help="Truncate the displayed original message to this many chars (default: 800)",
+    )
+    review_parser.add_argument(
+        "--queue-dir",
+        type=str,
+        default=str(review_queue.DEFAULT_QUEUE_DIR),
+        help="Directory for the processed/reviewed ledgers (default: data/queue)",
+    )
+    review_parser.set_defaults(func=_cmd_review)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -145,6 +145,71 @@ Other flags: `--task` (the instruction sent to Claude), `--config` (router YAML,
 default `configs/router.yaml`), `--approved-dir`, `--sessions-dir`, `--max-chars`
 (truncate the displayed original).
 
+### Read from IMAP instead of an mbox file
+python -m src.cli process --source imap --days 7 --limit 10
+
+`--source imap` fetches unread messages from the last `--days` days over a
+**read-only** IMAP connection (stdlib `imaplib`): the folder is opened with
+`readonly=True` and bodies are fetched with `BODY.PEEK[]`, so nothing is ever
+marked read, deleted, or sent. Configure via environment variables:
+
+```
+IMAP_HOST=imap.gmail.com
+IMAP_USER=you@example.com
+IMAP_PASS=<app-specific password>
+IMAP_FOLDER=INBOX          # optional
+```
+
+**Use an app-specific password, never your main account password.** For Gmail
+that's Google Account → Security → 2-Step Verification → App passwords; most
+providers have an equivalent. The password is only ever read from the
+environment — never put it on the command line or in a file that gets
+committed.
+
+## start + review (the queue-based pipeline)
+source venv/bin/activate
+
+The two-phase flow: `start` does all the slow work up front, `review` is the
+fast human pass. `start` scans a folder of .mbox files (default `data/inbox/`)
+and processes every email it hasn't seen before — triage locally, score
+sensitivity, delegate escalations to Claude (anonymized → rehydrated) — while
+showing a spinner + progress bar. It then ranks the batch by importance with
+**one** Claude call (the digest payload is anonymized before it leaves the
+box, and Claude's per-email reasons are rehydrated locally), and prints a
+summary table of every email's summary + action items, most important first.
+State lives in append-only ledgers under `data/queue/`, so re-running `start`
+only processes new mail.
+
+`review` then walks every processed-but-unreviewed email, most important
+first: approve / edit / reject each draft, quit anytime — the rest stays
+queued for next time. Approved drafts land in `data/approved_drafts/`.
+
+Eventually a single first-run entry point will ask "1. Local MBOX files
+(Recommended) or 2. Connect your email (IMAP)"; for now they are separate
+commands.
+
+### Build the test inbox (50 Enron emails, requires data/dev_corpus.mbox)
+python - <<'EOF'
+import mailbox, random
+msgs = list(mailbox.mbox('data/dev_corpus.mbox'))
+out = mailbox.mbox('data/inbox/enron_50.mbox')
+for m in random.Random(42).sample(msgs, 50): out.add(m)
+out.flush(); out.close()
+EOF
+
+### Process everything new in data/inbox, then review
+python -m src.cli start data/inbox
+python -m src.cli review
+
+### Same, but from the IMAP account (read-only; env vars as above)
+python -m src.cli start-imap --days 7
+python -m src.cli review
+
+Flags: `start`/`start-imap` take `--limit` (cap new emails processed),
+`--anonymizer`, `--task`, `--config`, `--queue-dir`; `start-imap` adds
+`--days`. `review` takes `--queue-dir`, `--approved-dir`, `--sessions-dir`,
+`--max-chars`.
+
 ## run the test suite
 source venv/bin/activate
 ### All tests (includes the live Claude API integration tests; needs ANTHROPIC_API_KEY)
