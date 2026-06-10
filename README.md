@@ -184,7 +184,16 @@ python -m src.cli review --max-chars 2000             # show more of each origin
 `start`/`start-imap` also take `--task`, `--config`, `--queue-dir`; `review`
 also takes `--queue-dir`, `--approved-dir`, `--sessions-dir`.
 
-### Use your real inbox over IMAP (read-only)
+### Method 1: Download your emails as an MBOX (recommended)
+If you use a Mac, Apple Mail is the most straightforward option because it natively supports exporting directly to .mbox without leaving the app.
+1. Open Apple Mail.
+2. Go to Mailbox > New Mailbox in the top menu bar and create a local folder (e.g., name it "Weekly Export" and set the location to "On My Mac").
+3. Use the search bar to find your week. You can use search operators like date:06/02/2026-06/09/2026.
+4. Select all the emails in the search results (Cmd + A) and drag them into your new "Weekly Export" mailbox.
+5. Right-click the "Weekly Export" mailbox in your sidebar and select Export Mailbox.
+6. Drag this file into data/inbox
+
+### Method 2 Use your real inbox over IMAP (read-only)
 
 `start-imap` is `start` fed by unread mail from an IMAP account instead of a
 folder. (The eventual single entry point will ask on first run: "1. Local
