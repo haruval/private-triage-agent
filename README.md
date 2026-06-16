@@ -75,11 +75,38 @@ Thursday works for my schedule. I'll give you a call at (415) 555-0182 to confir
 timing.
 ```
 
+## How anonymization works
+
+Anonymization runs in three layers, each catching what the others structurally
+can't. The default (`combined`) runs all of them; you can select a single layer
+with `--anonymizer`.
+
+1. **Regex** - fixed-shape PII: email addresses, phone numbers, dollar amounts,
+   dates. Fast and exact, but blind to anything without a predictable pattern.
+2. **NER** (Named Entity Recognition, spaCy `en_core_web_trf`) - reads the
+   sentence and tags open-ended proper nouns that regex can't: people (`PERSON`),
+   organizations (`ORG`), locations. This is how `Sarah` becomes `Alex_P1` and
+   `Northwind` becomes `Acme_O1`. NER runs on the regex-anonymized text, so the
+   cheap exact patterns clean up first.
+3. **Coreference resolution** (`fastcoref`) - closes **pronoun leaks**. Even
+   after NER replaces every "Sarah," the text can still say "**she** flagged two
+   changes and **her** team will push back" - pronouns that point straight back
+   to a real, identified person. Pronouns aren't named entities, so NER misses
+   them. Coref links "Sarah," "she," and "her" into one referential chain so
+   those references get anonymized too. `scripts/eval_pronoun_leak.py` measures
+   how many such leaks slip through with and without this layer.
+
+PII becomes proper-noun-shaped placeholders (`Alex_P1`, `Acme_O1`, `Amount_M1`)
+because downstream LLMs treat them as in-distribution proper nouns. The mapping
+stays local and re-hydration reverses it after Claude responds. Coreference
+models aren't perfect, so the eval harness reports a leak *rate* rather than
+asserting zero.
+
 ## Layout
 
 - `src/ingestion/` - loaders for `.mbox` files and read-only IMAP
 - `src/triage/` - local model classification and drafting
-- `src/anonymize/` - anonymization, mapping store, re-hydration
+- `src/anonymize/` - regex / NER / coref anonymizers, mapping store, re-hydration
 - `src/router/` - sensitivity scoring, escalation logic, importance ranking
 - `src/delegate/` - Claude API client
 - `src/review_queue.py` - append-only processed/reviewed ledgers behind `start` + `review`
