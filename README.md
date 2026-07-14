@@ -10,36 +10,44 @@ dollar figures), the email is **anonymized**, sent to Claude for a stronger
 draft, then **re-hydrated** locally. Nothing is sent automatically: every draft
 is reviewed by you first. 
 
-Under the hood, the anonymization stage is where most of the NLP engineering
-lives. It composes three complementary techniques, each covering a failure mode
-the others structurally miss:
+Under the hood, it runs three complementary layers, each covering a failure mode the
+others structurally miss. The default (`combined`) runs all three; you can
+select a single layer with `--anonymizer`.
 
-- **Deterministic regex** for fixed-shape PII — emails, phone numbers, dollar
-  amounts, dates. Fast and exact, but blind to anything without a predictable
+- **Deterministic regex** for fixed-shape PII: emails, phone numbers, dollar
+  amounts, dates. Fast and exact, but can't work on anything without a predictable
   pattern.
 - A **spaCy transformer NER pipeline** (`en_core_web_trf`, a RoBERTa-based
-  model) that reads each sentence and tags the open-ended proper nouns no
-  pattern can enumerate: people (`PERSON`), organizations (`ORG`), locations
+  model) that reads each sentence and tags the open-ended proper nouns: people (`PERSON`), organizations (`ORG`), locations
   (`GPE`), and facilities (`FAC`). This is what turns `Sarah` into `Alex_P1`
-  and `Northwind` into `Acme_O1`.
+  and `Northwind` into `Acme_O1`. NER runs on the regex-anonymized text, so the
+  cheap exact patterns clean up first.
 - **Neural coreference resolution** (fastcoref's `biu-nlp/f-coref` model) that
-  links pronoun chains back to those entities. After NER replaces every
-  "Sarah," a sentence can still leak "**she** flagged two changes and **her**
-  team will push back" — pronouns that resolve straight to a real, identified
-  person. Coref clusters "Sarah," "she," and "her" into one referential chain
-  so the pronouns get scrubbed too. (`en_coreference_web_trf`, spaCy's own
-  experimental coref, doesn't work for me on Apple Silicon rn, which is
-  why fastcoref is used here.)
+  links every pronoun back to the entity it refers to. Coref predicts *mention
+  clusters* — every span that points to the same entity, returned as character
+  offsets — so "Sarah," "she," and "her" come back as one chain. Each pronoun
+  then inherits its placeholder from that cluster: the model finds the mention
+  in the chain that overlaps an entity NER already tagged (`Sarah → Alex_P1`)
+  and rewrites every other mention in the chain to the same `Alex_P1`. That
+  offset-based linking is what lets a bare "she" three sentences later resolve
+  to the *correct* person rather than a generic redaction. This is what closes
+  **pronoun leaks**: after NER replaces every "Sarah," a sentence can still leak
+  "**she** flagged two changes and **her** team will push back" — pronouns that
+  point straight back to a real, identified person. Pronouns aren't named
+  entities, so NER can't touch them; only the coref chain can.
+  `scripts/eval_pronoun_leak.py` measures how many such leaks slip through with
+  and without this layer. (`en_coreference_web_trf`, spaCy's own experimental
+  coref, doesn't work for me on Apple Silicon rn, which is why fastcoref is used
+  here.)
 
 The three passes run in sequence on progressively cleaner text. Their
 detections are merged with longest-match overlap resolution and applied
 right-to-left so character offsets stay valid, and every entity maps to a
 stable, proper-noun-shaped placeholder (`Alex_P1`, `Acme_O1`, `Amount_M1`) —
-so the Claude side reads in-distribution tokens rather than opaque redactions,
-and local re-hydration reverses the exact same mapping afterwards. A held-out
-eval harness reports the residual PII leak rate per layer rather than asserting
-zero, since coreference models are imperfect. The layer-by-layer walkthrough is
-in [How anonymization works](#how-anonymization-works) below.
+downstream LLMs treat these as in-distribution proper nouns rather than opaque
+redactions, and local re-hydration reverses the exact same mapping after Claude
+responds. Because coreference models are imperfect, a held-out eval harness
+reports the residual PII leak *rate* per layer rather than asserting zero.
 
 
 Here's one example of an email going through the pipeline.
@@ -108,33 +116,6 @@ and get back to you on the $250,000 figure by end of business tomorrow.
 Thursday works for my schedule. I'll give you a call at (415) 555-0182 to confirm
 timing.
 ```
-
-## How anonymization works
-
-Anonymization runs in three layers, each catching what the others structurally
-can't. The default (`combined`) runs all of them; you can select a single layer
-with `--anonymizer`.
-
-1. **Regex** - fixed-shape PII: email addresses, phone numbers, dollar amounts,
-   dates. Fast and exact, but blind to anything without a predictable pattern.
-2. **NER** (Named Entity Recognition, spaCy `en_core_web_trf`) - reads the
-   sentence and tags open-ended proper nouns that regex can't: people (`PERSON`),
-   organizations (`ORG`), locations. This is how `Sarah` becomes `Alex_P1` and
-   `Northwind` becomes `Acme_O1`. NER runs on the regex-anonymized text, so the
-   cheap exact patterns clean up first.
-3. **Coreference resolution** (`fastcoref`) - closes **pronoun leaks**. Even
-   after NER replaces every "Sarah," the text can still say "**she** flagged two
-   changes and **her** team will push back" - pronouns that point straight back
-   to a real, identified person. Pronouns aren't named entities, so NER misses
-   them. Coref links "Sarah," "she," and "her" into one referential chain so
-   those references get anonymized too. `scripts/eval_pronoun_leak.py` measures
-   how many such leaks slip through with and without this layer.
-
-PII becomes proper-noun-shaped placeholders (`Alex_P1`, `Acme_O1`, `Amount_M1`)
-because downstream LLMs treat them as in-distribution proper nouns. The mapping
-stays local and re-hydration reverses it after Claude responds. Coreference
-models aren't perfect, so the eval harness reports a leak *rate* rather than
-asserting zero.
 
 ## Layout
 
