@@ -10,7 +10,7 @@ dollar figures), the email is **anonymized**, sent to Claude for a stronger
 draft, then **re-hydrated** locally. Nothing is sent automatically: every draft
 is reviewed by you first. 
 
-Under the hood, it runs three complementary layers, each covering a failure mode the
+Under the hood, it runs three sequential layers, each covering a failure mode the
 others structurally miss. The default (`combined`) runs all three; you can
 select a single layer with `--anonymizer`.
 
@@ -24,30 +24,29 @@ select a single layer with `--anonymizer`.
   cheap exact patterns clean up first.
 - **Neural coreference resolution** (fastcoref's `biu-nlp/f-coref` model) that
   links every pronoun back to the entity it refers to. Coref predicts *mention
-  clusters* — every span that points to the same entity, returned as character
-  offsets — so "Sarah," "she," and "her" come back as one chain. Each pronoun
+  clusters*, every span that points to the same entity, returned as character
+  offsets, so "Sarah," "she," and "her" come back as one chain. Each pronoun
   then inherits its placeholder from that cluster: the model finds the mention
   in the chain that overlaps an entity NER already tagged (`Sarah → Alex_P1`)
   and rewrites every other mention in the chain to the same `Alex_P1`. That
   offset-based linking is what lets a bare "she" three sentences later resolve
-  to the *correct* person rather than a generic redaction. This is what closes
-  **pronoun leaks**: after NER replaces every "Sarah," a sentence can still leak
-  "**she** flagged two changes and **her** team will push back" — pronouns that
-  point straight back to a real, identified person. Pronouns aren't named
+  to the *correct* person rather than a generic redaction. Pronouns aren't named
   entities, so NER can't touch them; only the coref chain can.
   `scripts/eval_pronoun_leak.py` measures how many such leaks slip through with
   and without this layer. (`en_coreference_web_trf`, spaCy's own experimental
   coref, doesn't work for me on Apple Silicon rn, which is why fastcoref is used
   here.)
 
-The three passes run in sequence on progressively cleaner text. Their
-detections are merged with longest-match overlap resolution and applied
-right-to-left so character offsets stay valid, and every entity maps to a
-stable, proper-noun-shaped placeholder (`Alex_P1`, `Acme_O1`, `Amount_M1`) —
-downstream LLMs treat these as in-distribution proper nouns rather than opaque
-redactions, and local re-hydration reverses the exact same mapping after Claude
-responds. Because coreference models are imperfect, a held-out eval harness
-reports the residual PII leak *rate* per layer rather than asserting zero.
+The three passes run in sequence on progressively cleaner text. When the
+layers flag overlapping spans, the longest match wins, and replacements are
+applied right-to-left so earlier character offsets stay valid as later ones are
+rewritten. Every entity maps to a stable, proper-noun-shaped placeholder
+(`Alex_P1`, `Acme_O1`, `Amount_M1`).
+On escalation, Claude sees these as in-distribution proper nouns rather than
+opaque redactions, and its system prompt instructs it to copy every placeholder
+back verbatim, so local re-hydration can reverse the exact same mapping after
+Claude responds. Because coreference models are imperfect, a held-out eval
+harness reports the residual PII leak rate per layer.
 
 
 Here's one example of an email going through the pipeline.
