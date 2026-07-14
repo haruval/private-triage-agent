@@ -118,6 +118,8 @@ asserting zero.
 ## Setup
 
 Requires Python 3 and [Ollama](https://ollama.com/) installed locally with `gemma3:27b` pulled.
+
+
 `ollama pull gemma3:27b` (~17 GB)
 
 ```sh
@@ -177,8 +179,8 @@ Review queue - 3 email(s) awaiting review
 │     │      │ reply.)                                                       │
 ├─────┼──────┼───────────────────────────────────────────────────────────────┤
 │   2 │    5 │ Lunch Thursday?                                               │
-│     │      │ from raj@example.com  •  needs_reply  •  draft: local         │
-│     │      │ Raj is asking whether you're free for lunch on Thursday.      │
+│     │      │ from vivian@example.com  •  needs_reply  •  draft: local         │
+│     │      │ Vivian is asking whether you're free for lunch on Thursday.      │
 │     │      │   • Reply with your availability                             │
 │     │      │ (Routine scheduling; reply when convenient.)                 │
 ├─────┼──────┼───────────────────────────────────────────────────────────────┤
