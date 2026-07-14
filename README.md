@@ -34,7 +34,7 @@ select a single layer with `--anonymizer`.
   entities, so NER can't touch them; only the coref chain can.
   `scripts/eval_pronoun_leak.py` measures how many such leaks slip through with
   and without this layer. (`en_coreference_web_trf`, spaCy's own experimental
-  coref, doesn't work for me on Apple Silicon rn, which is why fastcoref is used
+  coref, doesn't work on Apple Silicon rn, which is why fastcoref is used
   here.)
 
 The three passes run in sequence on progressively cleaner text. When the
@@ -131,7 +131,7 @@ timing.
 
 ## Setup
 
-Requires Python 3 and [Ollama](https://ollama.com/) installed locally with `gemma3:27b` pulled.
+Requires Python 3.12+ and [Ollama](https://ollama.com/) installed locally with `gemma3:27b` pulled.
 
 
 `ollama pull gemma3:27b` (~17 GB)
