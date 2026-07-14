@@ -258,13 +258,23 @@ providers have an equivalent. The password is only ever read from the
 environment, never put it on the command line or in a file that gets
 committed.
 
-## Old Testing Stuff
+## Testing Stuff
 
-### Build the test inbox (50 Enron emails, requires data/dev_corpus.mbox)
+### Build the test inbox (50 emails from Enron dataset)
+
+First fetch the dev corpus. This streams the ~423 MB CMU Enron tarball
+(cached under `data/raw/`) and samples it down to `data/dev_corpus.mbox`:
+
+```sh
+python scripts/fetch_enron.py
+```
+
+Then sample 50 messages from it into the test inbox:
 
 ```sh
 python - <<'EOF'
-import mailbox, random
+import mailbox, random, os
+os.makedirs('data/inbox', exist_ok=True)
 msgs = list(mailbox.mbox('data/dev_corpus.mbox'))
 out = mailbox.mbox('data/inbox/enron_50.mbox')
 for m in random.Random(42).sample(msgs, 50): out.add(m)
@@ -272,7 +282,9 @@ out.flush(); out.close()
 EOF
 ```
 
-## process emails (one-shot pipeline, no queue)
+## Old Test Commands
+
+## process emails (no queue)
 
 `process` is the single-command version: triage, escalate, and review in one
 sitting, nothing persisted between runs. For each email: triage locally →
