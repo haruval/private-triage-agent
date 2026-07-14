@@ -270,6 +270,107 @@ def test_session_record_no_saved_path() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _processed_from_record  (review's rebuild of a stored queue record)
+# ---------------------------------------------------------------------------
+
+
+def test_processed_from_record_round_trip() -> None:
+    from src.cli import _processed_from_record
+    from src.review_queue import QueueRecord
+
+    p = _build_processed(
+        _email(body="contact alice@example.com"),
+        _result(),
+        _decision(escalate=True),
+        anonymizer=_FakeAnonymizer(),
+        claude_client=_EchoClaude(),
+        task="reply",
+    )
+    rec = QueueRecord(
+        email=p.email,
+        result=p.result,
+        decision=p.decision,
+        draft=p.draft,
+        provenance=p.provenance,
+        mapping=p.mapping,
+        claude_used=p.claude_used,
+        error=p.error,
+        importance=7.0,
+        importance_reason="urgent",
+        ranked_by="Claude",
+        source="mbox:x.mbox",
+        processed_at="2026-06-09T10:00:00+00:00",
+    )
+    rebuilt = _processed_from_record(rec)
+    assert rebuilt == p
+
+
+# ---------------------------------------------------------------------------
+# reset  (clears the queue ledgers so `start` reprocesses everything)
+# ---------------------------------------------------------------------------
+
+
+def _queue_record(email_id: str = "<abc@host>") -> Any:
+    from src.review_queue import QueueRecord
+
+    return QueueRecord(
+        email=_email(email_id=email_id),
+        result=_result(),
+        decision=_decision(escalate=False),
+        draft="d",
+        provenance="local",
+        mapping={},
+        claude_used=False,
+        error=None,
+        importance=5.0,
+        importance_reason="",
+        ranked_by="Claude",
+        source="mbox:x.mbox",
+        processed_at="2026-06-09T10:00:00+00:00",
+    )
+
+
+def test_reset_deletes_both_ledgers(tmp_path: Path) -> None:
+    from src.cli import main
+    from src.review_queue import (
+        append_records,
+        append_reviewed,
+        processed_path,
+        reviewed_path,
+    )
+
+    append_records(tmp_path, [_queue_record()])
+    append_reviewed(tmp_path, "<abc@host>", "approve", None)
+    assert processed_path(tmp_path).exists() and reviewed_path(tmp_path).exists()
+
+    rc = main(["reset", "--queue-dir", str(tmp_path), "--yes"])
+    assert rc == 0
+    assert not processed_path(tmp_path).exists()
+    assert not reviewed_path(tmp_path).exists()
+
+
+def test_reset_on_empty_queue_is_a_noop(tmp_path: Path) -> None:
+    from src.cli import main
+
+    rc = main(["reset", "--queue-dir", str(tmp_path), "--yes"])
+    assert rc == 0
+
+
+def test_reset_aborts_without_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.cli import main
+    from src.review_queue import append_records, processed_path
+
+    append_records(tmp_path, [_queue_record()])
+    monkeypatch.setattr("src.cli.Prompt.ask", lambda *a, **k: "n")
+
+    rc = main(["reset", "--queue-dir", str(tmp_path)])
+    assert rc == 0
+    assert processed_path(tmp_path).exists()  # nothing deleted
+
+
+# ---------------------------------------------------------------------------
 # _process_worker  (background half of the `process` command)
 # ---------------------------------------------------------------------------
 #

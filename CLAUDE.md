@@ -51,8 +51,20 @@ done.** That means you can rely on:
   then NER on the regex-anonymized text)
 - `CorefAnonymizer` (fastcoref, see below) + `scripts/eval_pronoun_leak.py`
 
-**Next up: prompts 11–17** — rehydration, utility eval, sensitivity scorer,
-Claude client, full integration, IMAP, final report. Notes for each below.
+**Prompts 11–16 are done too** — rehydration, utility eval, sensitivity
+scorer, Claude client, full integration (`process` runs its processing on a
+background thread; `process-old` is the original sequential version), and
+read-only IMAP (`src/ingestion/imap_loader.py`; `--source imap` on both
+process commands). Beyond the prompt pack there is a queue-based pipeline:
+`start` / `start-imap` process all new mail into append-only ledgers under
+`data/queue/` (`src/review_queue.py`), one anonymized Claude call ranks each
+batch by importance (`src/router/importance.py`), and `review` walks the
+unreviewed queue most-important-first. The planned single entry point (first
+run asks: local mbox files vs. connect email over IMAP) is not built yet —
+`start` and `start-imap` are deliberately separate commands for now.
+
+**Remaining: prompt 17** (final eval & writeup). The per-prompt notes below
+are kept for reference.
 
 ## Conventions to preserve
 
