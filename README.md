@@ -17,7 +17,7 @@ one by one so you can approve, edit, or reject each one.
 
 ```sh
 python -m src.cli start    # process all new mail, rank by importance
-python -m src.cli review             # approve / edit / reject, most important first
+python -m src.cli review   # approve / edit / reject, most important first
 ```
 
 **1. Incoming email**
@@ -125,12 +125,12 @@ ALLOW_RECENT_PACKAGES=1 make install            #i put a min package date lock t
 cp .env.example .env    # fill in ANTHROPIC_API_KEY
 ```
 
+`make install` builds the venv with `python3.12` by default. If that exact
+executable isn't on your PATH, point it at your interpreter, e.g.
+`make install PYTHON_BIN=python3` (must be Python 3.12+).
+
 ## Usage
 
-```sh
-make test    # run the test suite
-make clean   # remove venv and caches
-```
 
 ## start + review (the main pipeline)
 
@@ -282,7 +282,18 @@ out.flush(); out.close()
 EOF
 ```
 
+
 ## Old Test Commands
+
+```sh
+make test    # run the test suite
+make clean   # remove venv and caches
+```
+
+The commands in the sections below (`process`, `triage-emails`,
+`anonymize-emails`, and the utility eval) read from `data/dev_corpus.mbox`.
+That file isn't in the repo — generate it first with
+`python scripts/fetch_enron.py` (see [Build the test inbox](#build-the-test-inbox-50-emails-from-enron-dataset) above).
 
 ## process emails (no queue)
 
