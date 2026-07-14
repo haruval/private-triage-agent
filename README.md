@@ -118,6 +118,7 @@ asserting zero.
 ## Setup
 
 Requires Python 3 and [Ollama](https://ollama.com/) installed locally with `gemma3:27b` pulled.
+`ollama pull gemma3:27b` (~17 GB)
 
 ```sh
 make install            # create venv, install requirements, download spaCy model
