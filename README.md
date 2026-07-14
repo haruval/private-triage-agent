@@ -150,8 +150,7 @@ python -m src.cli review
 `start` scans a folder of `.mbox` files (default `data/inbox/`, or pass a
 path: `start path/to/folder`) and processes every email it hasn't seen
 before: triage locally, score sensitivity, and for escalations anonymize,
-send to Claude, and rehydrate. A spinner and progress bar show how far it has
-gotten:
+send to Claude, and rehydrate. 
 
 ```
 ⠧ Re: 3/13 Checkout ━━━━━━━━╸─────────────── 12/47 0:03:12
@@ -218,9 +217,13 @@ everything (approved drafts and session logs are kept):
 python -m src.cli reset       # asks for confirmation
 python -m src.cli reset -y    # skip the prompt
 ```
+## Email Ingestion
+(The eventual single entry point will ask on first run: "1. Local
+MBOX files (Recommended) or 2. Connect your email". For now they are
+separate commands.)
 
 ### Method 1: Download your emails as an MBOX (recommended)
-If you use a Mac, Apple Mail is the most straightforward option because it natively supports exporting directly to .mbox without leaving the app.
+If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
 1. Open Apple Mail.
 2. Go to Mailbox > New Mailbox in the top menu bar and create a local folder (e.g., name it "Weekly Export" and set the location to "On My Mac").
 3. Use the search bar to find your week. You can use search operators like date:06/02/2026-06/09/2026.
@@ -231,9 +234,7 @@ If you use a Mac, Apple Mail is the most straightforward option because it nativ
 ### Method 2 Use your real inbox over IMAP (read-only)
 
 `start-imap` is `start` fed by unread mail from an IMAP account instead of a
-folder. (The eventual single entry point will ask on first run: "1. Local
-MBOX files (Recommended) or 2. Connect your email". For now they are
-separate commands.)
+folder. 
 
 ```sh
 python -m src.cli start-imap --days 7   # unread from the last 7 days
@@ -247,15 +248,17 @@ marked read, deleted, or sent. Configure via environment variables:
 ```
 IMAP_HOST=imap.gmail.com
 IMAP_USER=you@example.com
-IMAP_PASS=<app-specific password>
+IMAP_PASS=<imap app password *see below*>
 IMAP_FOLDER=INBOX          # optional
 ```
 
-**USE AN APP-SPECIFIC PASSWORD, NEVER YOUR MAIN ACCOUNT PASSWORD.** For Gmail
+**USE A PASSWORD JUST FOR THIS, NOT YOUR REAL ACCOUNT PASSWORD. I WOULD NOT TRUST ME THAT MUCH.** For Gmail
 that's Google Account → Security → 2-Step Verification → App passwords; most
 providers have an equivalent. The password is only ever read from the
 environment, never put it on the command line or in a file that gets
 committed.
+
+## Old Testing Stuff
 
 ### Build the test inbox (50 Enron emails, requires data/dev_corpus.mbox)
 
