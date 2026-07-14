@@ -8,7 +8,41 @@ The local model triages every email: category, summary, action items, a reply
 draft. When it's uncertain or the content looks sensitive (legal, negotiation,
 dollar figures), the email is **anonymized**, sent to Claude for a stronger
 draft, then **re-hydrated** locally. Nothing is sent automatically: every draft
-is reviewed by you first. Here's one example of an email going through the pipeline.
+is reviewed by you first. 
+
+Under the hood, the anonymization stage is where most of the NLP engineering
+lives. It composes three complementary techniques, each covering a failure mode
+the others structurally miss:
+
+- **Deterministic regex** for fixed-shape PII — emails, phone numbers, dollar
+  amounts, dates. Fast and exact, but blind to anything without a predictable
+  pattern.
+- A **spaCy transformer NER pipeline** (`en_core_web_trf`, a RoBERTa-based
+  model) that reads each sentence and tags the open-ended proper nouns no
+  pattern can enumerate: people (`PERSON`), organizations (`ORG`), locations
+  (`GPE`), and facilities (`FAC`). This is what turns `Sarah` into `Alex_P1`
+  and `Northwind` into `Acme_O1`.
+- **Neural coreference resolution** (fastcoref's `biu-nlp/f-coref` model) that
+  links pronoun chains back to those entities. After NER replaces every
+  "Sarah," a sentence can still leak "**she** flagged two changes and **her**
+  team will push back" — pronouns that resolve straight to a real, identified
+  person. Coref clusters "Sarah," "she," and "her" into one referential chain
+  so the pronouns get scrubbed too. (`en_coreference_web_trf`, spaCy's own
+  experimental coref, doesn't work for me on Apple Silicon rn, which is
+  why fastcoref is used here.)
+
+The three passes run in sequence on progressively cleaner text. Their
+detections are merged with longest-match overlap resolution and applied
+right-to-left so character offsets stay valid, and every entity maps to a
+stable, proper-noun-shaped placeholder (`Alex_P1`, `Acme_O1`, `Amount_M1`) —
+so the Claude side reads in-distribution tokens rather than opaque redactions,
+and local re-hydration reverses the exact same mapping afterwards. A held-out
+eval harness reports the residual PII leak rate per layer rather than asserting
+zero, since coreference models are imperfect. The layer-by-layer walkthrough is
+in [How anonymization works](#how-anonymization-works) below.
+
+
+Here's one example of an email going through the pipeline.
 
 
 You work in two steps. `start` processes new emails and prints an
