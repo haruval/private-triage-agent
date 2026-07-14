@@ -205,7 +205,9 @@ Review queue - 3 email(s) awaiting review
 
 `review` walks through every processed-but-unreviewed email in that order: approve /
 edit / reject each draft, quit anytime, and the rest stays queued for next
-time. Approved drafts land in `data/approved_drafts/`; every decision is
+time. Approved drafts land in `data/approved_drafts/` (and, depending on where
+the email came from, a click-to-open `.eml` or an IMAP draft, see
+[Sending approved replies](#sending-approved-replies)); every decision is
 logged to `logs/sessions/<timestamp>.jsonl`.
 
 State lives in two append-only ledgers under `data/queue/`
@@ -233,6 +235,8 @@ everything (approved drafts and session logs are kept):
 python -m src.cli reset       # asks for confirmation
 python -m src.cli reset -y    # skip the prompt
 ```
+
+
 ## Email Ingestion
 (The eventual single entry point will ask on first run: "1. Local
 MBOX files (Recommended) or 2. Connect your email". For now they are
@@ -257,9 +261,13 @@ python -m src.cli start-imap --days 7   # unread from the last 7 days
 python -m src.cli review
 ```
 
-The connection is **read-only** (stdlib `imaplib`): the folder is opened with
+Reading is **read-only** (stdlib `imaplib`): the folder is opened with
 `readonly=True` and bodies are fetched with `BODY.PEEK[]`, so nothing is ever
-marked read, deleted, or sent. Configure via environment variables:
+marked read, deleted, or sent. The one write the IMAP layer ever makes is
+saving an approved reply into your **Drafts** folder (see
+[Sending approved replies](#sending-approved-replies)); that APPEND is
+append-only and still never sends, marks read, or deletes. Configure via
+environment variables:
 
 ```
 IMAP_HOST=imap.gmail.com
@@ -273,6 +281,35 @@ that's Google Account → Security → 2-Step Verification → App passwords; mo
 providers have an equivalent. The password is only ever read from the
 environment, never put it on the command line or in a file that gets
 committed.
+
+## Sending approved replies
+
+The pipeline never sends mail. Approving a draft persists it so you can send
+it yourself, and where it goes depends on how the email got in, so the reply
+always lands somewhere you can actually send it from. No flags to remember.
+
+1. **Plain text (always).** Every approved draft is written to
+   `data/approved_drafts/<message-id>.txt`.
+2. **mbox source gets a `.eml`.** When the email came from an `.mbox` file
+   (`start`), an `.eml` is written next to the `.txt`.
+   Double-clicking it opens a fully pre-filled reply (recipient, `Re:` subject,
+   threading headers, body) in your email client,
+   so you are one click from sending.
+3. **IMAP source goes to Drafts.** When the email came in over IMAP
+   (`start-imap`), the reply is APPENDed straight
+   into your account's **Drafts** folder, flagged as a draft, so it shows up in
+   Gmail / Apple Mail / Outlook ready to review and send, in the same client
+   the message came from. 
+
+```sh
+python -m src.cli start data/inbox && python -m src.cli review   # approvals -> .eml
+python -m src.cli start-imap --days 7 && python -m src.cli review # approvals -> IMAP Drafts
+```
+
+The IMAP APPEND writes to the `Drafts` folder by default; on Gmail set
+`IMAP_DRAFTS_FOLDER=[Gmail]/Drafts`. This is the only write the IMAP layer
+ever makes, and it is APPEND-only: it never sends, it just adds to your drafts
+folder. The final Send is always done yourself.
 
 ## Testing Stuff
 

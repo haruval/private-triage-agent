@@ -23,11 +23,16 @@ import pytest
 from src.cli import (
     ProcessedEmail,
     _build_processed,
+    _build_reply_message,
     _email_payload,
+    _persist_approved,
     _process_worker,
+    _reply_subject,
     _safe_stem,
     _save_approved_draft,
+    _save_approved_eml,
     _session_record,
+    _source_is_imap,
 )
 from src.ingestion.mbox_loader import Email
 from src.router.sensitivity_scorer import EscalationDecision
@@ -234,6 +239,98 @@ def test_save_approved_draft_does_not_clobber(tmp_path: Path) -> None:
     assert p1.exists() and p2.exists()
     assert "one" in p1.read_text()
     assert "two" in p2.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Reply message building + .eml export
+# ---------------------------------------------------------------------------
+
+
+def test_reply_subject_prefixes_once() -> None:
+    assert _reply_subject("Lunch") == "Re: Lunch"
+    assert _reply_subject("Re: Lunch") == "Re: Lunch"  # no doubling
+    assert _reply_subject("RE: Lunch") == "RE: Lunch"  # case-insensitive
+    assert _reply_subject("") == "Re: (no subject)"
+
+
+def test_build_reply_message_headers_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IMAP_USER", "me@example.com")
+    p = _processed("the reply", email_id="<orig@host>")
+    msg = _build_reply_message(p, "the reply")
+    assert msg["To"] == "alice@example.com"       # reply goes to the sender
+    assert msg["From"] == "me@example.com"          # from IMAP_USER
+    assert msg["Subject"] == "Re: Hi"
+    assert msg["In-Reply-To"] == "<orig@host>"      # threads to the original
+    assert msg["References"] == "<orig@host>"
+    assert msg["X-Draft-Provenance"] == "local"
+    assert msg.get_content().strip() == "the reply"
+
+
+def test_build_reply_message_skips_threading_for_synthetic_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("IMAP_USER", raising=False)
+    p = _processed("body", email_id="<sha1:deadbeef@local>")
+    msg = _build_reply_message(p, "body")
+    assert "In-Reply-To" not in msg  # a content-hash id is not a real Message-ID
+    assert "References" not in msg
+    assert "From" not in msg  # no IMAP_USER set -> client fills it in
+
+
+# ---------------------------------------------------------------------------
+# _persist_approved routing (mbox -> .eml, imap -> IMAP Drafts)
+# ---------------------------------------------------------------------------
+
+
+def test_source_is_imap() -> None:
+    assert _source_is_imap("imap")
+    assert _source_is_imap("imap:INBOX")
+    assert not _source_is_imap("mbox:enron_50.mbox")
+    assert not _source_is_imap("")  # unknown/legacy -> treat as mbox
+
+
+def test_persist_mbox_source_writes_eml_no_imap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[bytes] = []
+    monkeypatch.setattr("src.cli.append_to_drafts", lambda raw: calls.append(raw))
+    out = tmp_path / "approved"
+    txt = _persist_approved(_processed("hi"), "hi", out, "mbox:enron_50.mbox")
+    assert txt.suffix == ".txt" and txt.exists()
+    assert list(out.glob("*.eml"))  # .eml emitted for mbox
+    assert calls == []              # never touches IMAP
+
+
+def test_persist_imap_source_appends_draft_no_eml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[bytes] = []
+    monkeypatch.setattr("src.cli.append_to_drafts", lambda raw: calls.append(raw))
+    out = tmp_path / "approved"
+    txt = _persist_approved(_processed("hi"), "hi", out, "imap:INBOX")
+    assert txt.suffix == ".txt" and txt.exists()
+    assert not list(out.glob("*.eml"))  # no .eml for imap
+    assert len(calls) == 1               # appended to Drafts once
+
+
+def test_persist_imap_append_failure_does_not_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(raw: bytes) -> None:
+        raise RuntimeError("IMAP APPEND to 'Drafts' failed")
+
+    monkeypatch.setattr("src.cli.append_to_drafts", _boom)
+    out = tmp_path / "approved"
+    # The .txt still lands even though the Drafts APPEND raised.
+    txt = _persist_approved(_processed("hi"), "hi", out, "imap")
+    assert txt.exists() and "hi" in txt.read_text()
+
+
+def test_persist_eml_and_txt_share_stem(tmp_path: Path) -> None:
+    out = tmp_path / "approved"
+    txt = _persist_approved(_processed("hi", email_id="<m@h>"), "hi", out, "mbox:x")
+    eml = next(out.glob("*.eml"))
+    assert eml.stem == txt.stem
 
 
 # ---------------------------------------------------------------------------

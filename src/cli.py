@@ -48,6 +48,7 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -71,7 +72,7 @@ from src.anonymize.ner_anonymizer import CombinedAnonymizer
 from src.anonymize.regex_anonymizer import RegexAnonymizer
 from src.anonymize.rehydrate import rehydrate
 from src.delegate.claude_client import ClaudeClient
-from src.ingestion.imap_loader import load_imap_unread
+from src.ingestion.imap_loader import append_to_drafts, load_imap_unread
 from src.ingestion.mbox_loader import Email, load_mbox
 from src.router.importance import EmailDigest, rank_importance
 from src.router.sensitivity_scorer import EscalationDecision, SensitivityScorer
@@ -678,6 +679,97 @@ def _save_approved_draft(p: ProcessedEmail, draft: str, out_dir: Path) -> Path:
     return path
 
 
+def _reply_subject(subject: str) -> str:
+    """`Re:`-prefix a subject without doubling an existing one."""
+    subject = (subject or "").strip()
+    if not subject:
+        return "Re: (no subject)"
+    return subject if subject[:3].lower() == "re:" else f"Re: {subject}"
+
+
+def _build_reply_message(p: ProcessedEmail, draft: str) -> EmailMessage:
+    """Build the approved reply as an RFC-5322 message: headers, threading, body.
+
+    Shared by the ``.eml`` export and the IMAP Drafts APPEND. ``To`` is the
+    original sender; ``From`` is filled from IMAP_USER when set, otherwise the
+    mail client supplies it on open. Threading headers are added only when the
+    original carried a real Message-ID (not a synthesized content hash), so
+    replies thread correctly in the recipient's client.
+    """
+    msg = EmailMessage()
+    orig = p.email
+    if orig.from_addr:
+        msg["To"] = orig.from_addr
+    sender = os.environ.get("IMAP_USER", "").strip()
+    if sender:
+        msg["From"] = sender
+    msg["Subject"] = _reply_subject(orig.subject)
+    if orig.id and not orig.id.startswith("<sha1:"):
+        msg["In-Reply-To"] = orig.id
+        existing_refs = (orig.headers.get("References") or "").strip()
+        msg["References"] = f"{existing_refs} {orig.id}".strip()
+    msg["X-Draft-Provenance"] = p.provenance
+    msg["X-Triage-Category"] = p.result.category
+    msg.set_content(draft.rstrip() + "\n")
+    return msg
+
+
+def _save_approved_eml(p: ProcessedEmail, draft: str, out_dir: Path) -> Path:
+    """Write the approved reply as a ``.eml`` that opens pre-filled in a mail client."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = _safe_stem(p.email)
+    path = out_dir / f"{stem}.eml"
+    n = 2
+    while path.exists():
+        path = out_dir / f"{stem}-{n}.eml"
+        n += 1
+    path.write_bytes(_build_reply_message(p, draft).as_bytes())
+    return path
+
+
+def _source_is_imap(source: str) -> bool:
+    """True when an email's source string names an IMAP connection.
+
+    IMAP sources are ``"imap"`` (both ``start-imap`` and ``process --source
+    imap``); mbox sources are ``"mbox:<file>"`` (``start``) or ``"mbox"``
+    (``process``). An empty/unknown source is treated as mbox.
+    """
+    return source.strip().lower().startswith("imap")
+
+
+def _persist_approved(
+    p: ProcessedEmail, draft: str, out_dir: Path, source: str
+) -> Path:
+    """Persist an approved draft, routing by where the email came from.
+
+    Always writes the plain ``.txt`` (the session-log anchor). Then, so the
+    reply lands somewhere you can actually send it from:
+
+    - **IMAP source** -> APPEND the reply into your Drafts folder, so it shows
+      up ready to send in the same mail client the message came from.
+    - **mbox source** -> write a double-clickable ``.eml`` that opens
+      pre-filled in your default mail client (there is no live mailbox to
+      write a draft into).
+
+    The routed step is best-effort: a failure is reported but never blocks the
+    review, and nothing here ever sends the mail. Returns the ``.txt`` path.
+    """
+    txt_path = _save_approved_draft(p, draft, out_dir)
+    if _source_is_imap(source):
+        try:
+            append_to_drafts(_build_reply_message(p, draft).as_bytes())
+            console.print("  [dim]saved to IMAP Drafts (not sent)[/]")
+        except Exception as exc:
+            console.print(f"  [yellow]could not save to IMAP Drafts: {exc}[/]")
+    else:
+        try:
+            eml_path = _save_approved_eml(p, draft, out_dir)
+            console.print(f"  [dim].eml written to {eml_path}[/]")
+        except Exception as exc:
+            console.print(f"  [yellow]could not write .eml: {exc}[/]")
+    return txt_path
+
+
 def _session_record(
     p: ProcessedEmail, action: str, saved_path: Path | None
 ) -> dict[str, Any]:
@@ -880,7 +972,7 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
             if action == "edit":
                 draft_to_save = _edit_draft(draft_to_save)
             if action in ("approve", "edit") and draft_to_save.strip():
-                saved_path = _save_approved_draft(p, draft_to_save, out_dir)
+                saved_path = _persist_approved(p, draft_to_save, out_dir, args.source)
                 approved += 1
                 console.print(f"  [green]saved →[/] {saved_path}")
             elif action == "reject":
@@ -1120,7 +1212,7 @@ def _cmd_process(args: argparse.Namespace) -> int:
             if action == "edit":
                 draft_to_save = _edit_draft(draft_to_save)
             if action in ("approve", "edit") and draft_to_save.strip():
-                saved_path = _save_approved_draft(p, draft_to_save, out_dir)
+                saved_path = _persist_approved(p, draft_to_save, out_dir, args.source)
                 approved += 1
                 console.print(f"  [green]saved →[/] {saved_path}")
             elif action == "reject":
@@ -1523,7 +1615,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
         if action == "edit":
             draft_to_save = _edit_draft(draft_to_save)
         if action in ("approve", "edit") and draft_to_save.strip():
-            saved_path = _save_approved_draft(p, draft_to_save, out_dir)
+            saved_path = _persist_approved(p, draft_to_save, out_dir, rec.source)
             approved += 1
             console.print(f"  [green]saved →[/] {saved_path}")
         elif action == "reject":
