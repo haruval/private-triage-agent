@@ -8,7 +8,48 @@ The local model triages every email: category, summary, action items, a reply
 draft. When it's uncertain or the content looks sensitive (legal, negotiation,
 dollar figures), the email is **anonymized**, sent to Claude for a stronger
 draft, then **re-hydrated** locally. Nothing is sent automatically: every draft
-is reviewed by you first. Here's one example of an email going through the pipeline.
+is reviewed by you first. 
+
+Under the hood, it runs three sequential layers, each covering a failure mode the
+others structurally miss. The default (`combined`) runs all three; you can
+select a single layer with `--anonymizer`.
+
+- **Deterministic regex** for fixed-shape PII: emails, phone numbers, dollar
+  amounts, dates. Fast and exact, but can't work on anything without a predictable
+  pattern.
+- A **spaCy transformer NER pipeline** (`en_core_web_trf`, a RoBERTa-based
+  model) that reads each sentence and tags the open-ended proper nouns: people (`PERSON`), organizations (`ORG`), locations
+  (`GPE`), and facilities (`FAC`). This is what turns `Sarah` into `Alex_P1`
+  and `Northwind` into `Acme_O1`. NER runs on the regex-anonymized text, so the
+  cheap exact patterns clean up first.
+- **Neural coreference resolution** (fastcoref's `biu-nlp/f-coref` model) that
+  links every pronoun back to the entity it refers to. Coref predicts *mention
+  clusters*, every span that points to the same entity, returned as character
+  offsets, so "Sarah," "she," and "her" come back as one chain. Each pronoun
+  then inherits its placeholder from that cluster: the model finds the mention
+  in the chain that overlaps an entity NER already tagged (`Sarah → Alex_P1`)
+  and rewrites every other mention in the chain to the same `Alex_P1`. That
+  offset-based linking is what lets a bare "she" three sentences later resolve
+  to the *correct* person rather than a generic redaction. Pronouns aren't named
+  entities, so NER can't touch them; only the coref chain can.
+  `scripts/eval_pronoun_leak.py` measures how many such leaks slip through with
+  and without this layer. (`en_coreference_web_trf`, spaCy's own experimental
+  coref, doesn't work on Apple Silicon rn, which is why fastcoref is used
+  here.)
+
+The three passes run in sequence on progressively cleaner text. When the
+layers flag overlapping spans, the longest match wins, and replacements are
+applied right-to-left so earlier character offsets stay valid as later ones are
+rewritten. Every entity maps to a stable, proper-noun-shaped placeholder
+(`Alex_P1`, `Acme_O1`, `Amount_M1`).
+On escalation, Claude sees these as in-distribution proper nouns rather than
+opaque redactions, and its system prompt instructs it to copy every placeholder
+back verbatim, so local re-hydration can reverse the exact same mapping after
+Claude responds. Because coreference models are imperfect, a held-out eval
+harness reports the residual PII leak rate per layer.
+
+
+Here's one example of an email going through the pipeline.
 
 
 You work in two steps. `start` processes new emails and prints an
@@ -75,33 +116,6 @@ Thursday works for my schedule. I'll give you a call at (415) 555-0182 to confir
 timing.
 ```
 
-## How anonymization works
-
-Anonymization runs in three layers, each catching what the others structurally
-can't. The default (`combined`) runs all of them; you can select a single layer
-with `--anonymizer`.
-
-1. **Regex** - fixed-shape PII: email addresses, phone numbers, dollar amounts,
-   dates. Fast and exact, but blind to anything without a predictable pattern.
-2. **NER** (Named Entity Recognition, spaCy `en_core_web_trf`) - reads the
-   sentence and tags open-ended proper nouns that regex can't: people (`PERSON`),
-   organizations (`ORG`), locations. This is how `Sarah` becomes `Alex_P1` and
-   `Northwind` becomes `Acme_O1`. NER runs on the regex-anonymized text, so the
-   cheap exact patterns clean up first.
-3. **Coreference resolution** (`fastcoref`) - closes **pronoun leaks**. Even
-   after NER replaces every "Sarah," the text can still say "**she** flagged two
-   changes and **her** team will push back" - pronouns that point straight back
-   to a real, identified person. Pronouns aren't named entities, so NER misses
-   them. Coref links "Sarah," "she," and "her" into one referential chain so
-   those references get anonymized too. `scripts/eval_pronoun_leak.py` measures
-   how many such leaks slip through with and without this layer.
-
-PII becomes proper-noun-shaped placeholders (`Alex_P1`, `Acme_O1`, `Amount_M1`)
-because downstream LLMs treat them as in-distribution proper nouns. The mapping
-stays local and re-hydration reverses it after Claude responds. Coreference
-models aren't perfect, so the eval harness reports a leak *rate* rather than
-asserting zero.
-
 ## Layout
 
 - `src/ingestion/` - loaders for `.mbox` files and read-only IMAP
@@ -117,7 +131,7 @@ asserting zero.
 
 ## Setup
 
-Requires Python 3 and [Ollama](https://ollama.com/) installed locally with `gemma3:27b` pulled.
+Requires Python 3.12+ and [Ollama](https://ollama.com/) installed locally with `gemma3:27b` pulled.
 
 
 `ollama pull gemma3:27b` (~17 GB)
