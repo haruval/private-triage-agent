@@ -124,10 +124,9 @@ make install            # create venv, install requirements, download spaCy mode
 ALLOW_RECENT_PACKAGES=1 make install            #i put a min package date lock to be extra safe but you can bypass it with this command if you need to
 cp .env.example .env    # fill in ANTHROPIC_API_KEY
 ```
-
-`make install` builds the venv with `python3.12` by default. If that exact
+make install builds the venv with python3.12 by default. If that exact
 executable isn't on your PATH, point it at your interpreter, e.g.
-`make install PYTHON_BIN=python3` (must be Python 3.12+).
+make install PYTHON_BIN=python3 (must be Python 3.12+).
 
 ## Usage
 
@@ -285,15 +284,6 @@ EOF
 
 ## Old Test Commands
 
-```sh
-make test    # run the test suite
-make clean   # remove venv and caches
-```
-
-The commands in the sections below (`process`, `triage-emails`,
-`anonymize-emails`, and the utility eval) read from `data/dev_corpus.mbox`.
-That file isn't in the repo — generate it first with
-`python scripts/fetch_enron.py` (see [Build the test inbox](#build-the-test-inbox-50-emails-from-enron-dataset) above).
 
 ## process emails (no queue)
 
@@ -355,6 +345,12 @@ python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer coref --shu
 
 ## run the test suite
 source venv/bin/activate
+
+```sh
+make test    # run the test suite
+make clean   # remove venv and caches
+```
+
 ### All tests (includes the live Claude API integration tests; needs ANTHROPIC_API_KEY)
 python -m pytest
 
