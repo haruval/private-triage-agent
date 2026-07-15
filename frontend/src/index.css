@@ -206,6 +206,22 @@ code {
   flex: none;
 }
 
+.processing-banner {
+  display: grid;
+  grid-template-columns: max-content minmax(160px, 360px) 1fr;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  flex: none;
+}
+
+.processing-banner md-linear-progress {
+  width: 100%;
+  --md-linear-progress-active-indicator-color: var(--md-sys-color-secondary);
+}
+
 .main {
   flex: 1;
   display: grid;
@@ -587,6 +603,14 @@ code {
 .settings-actions {
   display: flex;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 760px) {
+  .processing-banner {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
 }
 
 .settings-status {

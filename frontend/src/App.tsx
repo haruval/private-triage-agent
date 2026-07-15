@@ -3,15 +3,27 @@
 // IMAP settings as a simple state-switched second view (no router). The
 // queue polls /api/queue every 15s; approving/rejecting advances to the
 // next pending record, exactly like the terminal `review` loop.
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import type { QueueRecordDTO, ReviewAction } from './api'
-import { fetchQueue, importMbox, postReview } from './api'
+import type {
+  ProcessingSource,
+  ProcessingStatus,
+  QueueRecordDTO,
+  ReviewAction,
+} from './api'
+import {
+  fetchProcessingStatus,
+  fetchQueue,
+  importMbox,
+  postReview,
+  startProcessing,
+} from './api'
 import QueueList from './QueueList'
 import RecordDetail from './RecordDetail'
 import SettingsView from './SettingsView'
 
 const POLL_MS = 15_000
+const PROCESS_POLL_MS = 2_000
 
 type View = 'queue' | 'settings'
 
@@ -22,9 +34,13 @@ export default function App() {
   const [edits, setEdits] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [processing, setProcessing] = useState<ProcessingStatus | null>(null)
   const [apiError, setApiError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef<number | undefined>(undefined)
+  const processingRef = useRef<ProcessingStatus | null>(null)
+  const processInitialized = useRef(false)
+  const handledProcessId = useRef<string | null>(null)
 
   const showToast = useCallback((message: string) => {
     setToast(message)
@@ -48,7 +64,48 @@ export default function App() {
     return () => window.clearInterval(id)
   }, [refresh])
 
-  const list = records ?? []
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const next = await fetchProcessingStatus()
+        if (cancelled) return
+        const current = processingRef.current
+        if (current?.status === 'running' && next.id !== current.id) return
+        processingRef.current = next
+        setProcessing(next)
+        if (!processInitialized.current) {
+          processInitialized.current = true
+          if (next.status !== 'running') handledProcessId.current = next.id
+          return
+        }
+        if (
+          next.id &&
+          next.status !== 'running' &&
+          next.status !== 'idle' &&
+          handledProcessId.current !== next.id
+        ) {
+          handledProcessId.current = next.id
+          if (next.status === 'succeeded') {
+            showToast('Mail processing complete — review queue refreshed')
+            void refresh()
+          } else {
+            showToast(`error: ${next.message}`)
+          }
+        }
+      } catch {
+        // Queue polling already reports API connectivity failures prominently.
+      }
+    }
+    void poll()
+    const id = window.setInterval(() => void poll(), PROCESS_POLL_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [refresh, showToast])
+
+  const list = useMemo(() => records ?? [], [records])
   const selected = list.find((r) => r.email.id === selectedId) ?? list[0] ?? null
 
   const handleAction = useCallback(
@@ -90,6 +147,29 @@ export default function App() {
     [list, refresh, showToast],
   )
 
+  const beginProcessing = useCallback(
+    async (source: ProcessingSource, days = 7) => {
+      const next = await startProcessing(source, days)
+      processInitialized.current = true
+      handledProcessId.current = next.status === 'running' ? null : next.id
+      processingRef.current = next
+      setProcessing(next)
+      if (next.status === 'running') {
+        showToast(
+          source === 'imap'
+            ? 'Fetching and processing unread IMAP mail…'
+            : 'Processing uploaded .mbox mail…',
+        )
+      } else if (next.status === 'succeeded') {
+        showToast('Mail processing complete — review queue refreshed')
+        await refresh()
+      } else {
+        throw new Error(next.message)
+      }
+    },
+    [refresh, showToast],
+  )
+
   const handleUploadMbox = useCallback(async () => {
     setUploading(true)
     try {
@@ -97,17 +177,25 @@ export default function App() {
       if (resp.cancelled) {
         showToast('Upload cancelled')
       } else {
-        showToast(
-          `${resp.filename ?? 'Selected .mbox'} copied to data/inbox — run ` +
-            '`python -m src.cli start` to process it',
-        )
+        showToast(`${resp.filename ?? 'Selected .mbox'} copied to data/inbox`)
+        await beginProcessing('mbox')
       }
     } catch (err) {
       showToast(`error: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setUploading(false)
     }
-  }, [showToast])
+  }, [beginProcessing, showToast])
+
+  const handleStartImap = useCallback(
+    async (days: number) => {
+      await beginProcessing('imap', days)
+      setView('queue')
+    },
+    [beginProcessing],
+  )
+
+  const isProcessing = processing?.status === 'running'
 
   return (
     <div className="app">
@@ -116,7 +204,7 @@ export default function App() {
         <md-filled-tonal-button
           type="button"
           className="topbar-action flat-tonal-action"
-          disabled={uploading}
+          disabled={uploading || isProcessing}
           onClick={() => void handleUploadMbox()}
         >
           {uploading ? 'Selecting…' : 'Upload .mbox'}
@@ -125,6 +213,7 @@ export default function App() {
           <md-filled-tonal-button
             type="button"
             className="topbar-action flat-tonal-action"
+            disabled={isProcessing}
             onClick={() => setView('settings')}
           >
             Connect IMAP
@@ -155,6 +244,14 @@ export default function App() {
         )}
       </header>
 
+      {isProcessing && processing && (
+        <div className="processing-banner" role="status">
+          <span>{processing.message}</span>
+          <md-linear-progress indeterminate />
+          <span className="dim">Detailed progress is also visible in the API terminal.</span>
+        </div>
+      )}
+
       {apiError && (
         <div className="api-error" role="alert">
           API unreachable ({apiError}) — is the backend running? Start it with
@@ -163,7 +260,11 @@ export default function App() {
       )}
 
       {view === 'settings' ? (
-        <SettingsView showToast={showToast} />
+        <SettingsView
+          showToast={showToast}
+          processing={isProcessing}
+          onStartImap={handleStartImap}
+        />
       ) : records === null ? (
         <div className="empty-state dim">Loading queue…</div>
       ) : list.length === 0 ? (
@@ -172,8 +273,7 @@ export default function App() {
             Nothing to review — the queue is empty.
           </p>
           <p className="dim">
-            Run <code>python -m src.cli start</code> (or <code>start-imap</code>) to
-            process new mail.
+            Upload an .mbox file or connect IMAP to fetch and process new mail.
           </p>
           <md-outlined-button type="button" onClick={() => void refresh()}>
             Refresh

@@ -236,11 +236,12 @@ python -m src.cli reset -y    # skip the prompt
 ```
 
 
-## Web UI (browser review queue)
+## Web UI (full browser pipeline and review queue)
 
-A local web version of `review`: the same pending queue, most important
-first, with the same approve / edit / reject semantics writing the same
-ledgers, session logs, and approved drafts. One-time setup:
+A local web version of the full `start` / `start-imap` → `review` flow: the
+same pipeline fills the same pending queue, most important first, and approve /
+edit / reject writes the same ledgers, session logs, and approved drafts.
+One-time setup:
 `cd frontend && npm install` (needs Node 20+).
 
 ```sh
@@ -251,10 +252,13 @@ make web    # terminal 2 — the Vite dev server; open http://localhost:5173
 Start the API first: it writes the per-run session token to
 `frontend/.dev-token`, which the Vite proxy injects into every `/api`
 request. Top-left actions: **Upload .mbox** (opens a Finder file picker and
-copies the selected `.mbox` into `data/inbox`; then run
-`python -m src.cli start`) and
-**Connect IMAP** (edits the `IMAP_*` values in `.env`; use an app-specific
-password, never your main account password).
+copies the selected `.mbox` into `data/inbox`, then starts processing) and
+**Connect IMAP** (saves the `IMAP_*` values in `.env`, verifies the Inbox and
+Drafts folders read-only, and can fetch/process mail with one button; use an
+app-specific password, never your main account password). Processing runs in
+the API terminal, where detailed progress remains visible, while the browser
+shows job status and refreshes the queue when the run finishes. The terminal
+commands remain available but are not required for the web flow.
 
 ![web review UI](docs/images/web-review.png)
 
@@ -305,6 +309,7 @@ IMAP_HOST=imap.gmail.com
 IMAP_USER=you@example.com
 IMAP_PASS=<imap app password *see below*>
 IMAP_FOLDER=INBOX          # optional
+IMAP_DRAFTS_FOLDER=[Gmail]/Drafts  # Gmail; provider is prefilled in the web UI
 ```
 
 **USE A PASSWORD JUST FOR THIS, NOT YOUR REAL ACCOUNT PASSWORD. I WOULD NOT TRUST ME THAT MUCH.** For Gmail
@@ -334,10 +339,14 @@ python -m src.cli start data/inbox && python -m src.cli review   # approvals -> 
 python -m src.cli start-imap --days 7 && python -m src.cli review # approvals -> IMAP Drafts
 ```
 
-The IMAP APPEND writes to the `Drafts` folder by default; for Gmail set
-`IMAP_DRAFTS_FOLDER=[Gmail]/Drafts`. This is the only write the IMAP layer
-ever makes, and it is APPEND-only, it just adds to your drafts
-folder. The final Send is always done yourself.
+The IMAP APPEND writes to the configured `IMAP_DRAFTS_FOLDER`. The web UI
+prefills `[Gmail]/Drafts` for Gmail, `Draft` for Yahoo, and `Drafts` for the
+other built-in providers, while keeping the value editable. Each queued IMAP
+email records its non-secret account and Drafts-folder routing metadata; if
+you switch accounts, approval asks you to reconnect the account that supplied
+that email instead of putting its draft in the wrong mailbox. This is the only
+write the IMAP layer ever makes, and it is APPEND-only. The final Send is
+always done yourself.
 
 ## Development testing stuff
 

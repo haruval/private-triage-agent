@@ -71,9 +71,10 @@ from src.anonymize.ner_anonymizer import CombinedAnonymizer
 from src.anonymize.regex_anonymizer import RegexAnonymizer
 from src.anonymize.rehydrate import rehydrate
 from src.delegate.claude_client import ClaudeClient
-from src.ingestion.imap_loader import load_imap_unread
+from src.ingestion.imap_loader import DEFAULT_DRAFTS_FOLDER, load_imap_unread
 from src.ingestion.mbox_loader import Email, load_mbox
 from src.review_actions import (
+    ImapAccountMismatchError,
     ProcessedEmail,
     append_session_record,
     persist_approved,
@@ -158,7 +159,9 @@ def _render_email_panel(
     _label("escalate")
     if decision.escalate:
         body.append("true", style="bold red")
-        body.append(f"  (score {decision.score:.2f} — run `process` to delegate)", style="dim")
+        body.append(
+            f"  (score {decision.score:.2f} — run `process` to delegate)", style="dim"
+        )
     else:
         body.append("false", style="dim")
         body.append(f"  (score {decision.score:.2f})", style="dim")
@@ -285,6 +288,7 @@ def _build_anonymizer(name: str) -> tuple[Any, str]:
         return CombinedAnonymizer(), "regex+ner"
     if name == "coref":
         from src.anonymize.coref_anonymizer import CorefAnonymizer
+
         return CorefAnonymizer(), "regex+ner+coref"
     raise ValueError(f"unknown anonymizer: {name!r}")
 
@@ -332,7 +336,10 @@ def _highlight_placeholders(text: str) -> Text:
 def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
-    return text[:max_chars].rstrip() + f"\n[… {len(text) - max_chars} more chars truncated]"
+    return (
+        text[:max_chars].rstrip()
+        + f"\n[… {len(text) - max_chars} more chars truncated]"
+    )
 
 
 def _render_anonymize_panel(
@@ -367,7 +374,9 @@ def _render_anonymize_panel(
     body.append("\n\n")
 
     body.append("anonymized message (what Claude would see):\n", style="dim")
-    body.append_text(_highlight_placeholders(_truncate(anonymized_user_message, max_body_chars)))
+    body.append_text(
+        _highlight_placeholders(_truncate(anonymized_user_message, max_body_chars))
+    )
     body.append("\n\n")
 
     body.append("mapping:\n", style="dim")
@@ -525,8 +534,7 @@ def _build_processed(
                 claude_used = True
             except Exception as exc:  # network / API / anonymizer — degrade gracefully
                 error = (
-                    f"delegation failed ({type(exc).__name__}: {exc}); "
-                    f"kept local draft"
+                    f"delegation failed ({type(exc).__name__}: {exc}); kept local draft"
                 )
 
     return ProcessedEmail(
@@ -644,10 +652,14 @@ def _edit_draft(draft: str) -> str:
 
 
 def _persist_approved(
-    p: ProcessedEmail, draft: str, out_dir: Path, source: str
+    p: ProcessedEmail,
+    draft: str,
+    out_dir: Path,
+    source: str,
+    imap_account: review_queue.ImapAccountRef | None = None,
 ) -> Path:
     """`review_actions.persist_approved` plus console reporting of the outcome."""
-    outcome = persist_approved(p, draft, out_dir, source)
+    outcome = persist_approved(p, draft, out_dir, source, imap_account)
     if outcome.note:
         console.print(f"  [dim]{outcome.note}[/]")
     if outcome.warning:
@@ -752,7 +764,9 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
         f"triage {ollama_client.model})[/]"
     )
     if not interactive:
-        console.print("[dim](non-interactive: presenting + logging only, no prompts)[/]")
+        console.print(
+            "[dim](non-interactive: presenting + logging only, no prompts)[/]"
+        )
     console.print(f"[dim]session log → {session_path}[/]")
     console.print()
 
@@ -802,9 +816,7 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
                     )
 
         verb = "Delegating" if decision.escalate else "Drafting"
-        with console.status(
-            f"[cyan]{verb} [{i}] {subject_preview}", spinner="dots"
-        ):
+        with console.status(f"[cyan]{verb} [{i}] {subject_preview}", spinner="dots"):
             p = _build_processed(
                 email,
                 result,
@@ -992,7 +1004,9 @@ def _cmd_process(args: argparse.Namespace) -> int:
         f"triage {ollama_client.model}, background processing)[/]"
     )
     if not interactive:
-        console.print("[dim](non-interactive: presenting + logging only, no prompts)[/]")
+        console.print(
+            "[dim](non-interactive: presenting + logging only, no prompts)[/]"
+        )
     console.print(f"[dim]session log → {session_path}[/]")
     console.print()
 
@@ -1097,7 +1111,9 @@ def _cmd_process(args: argparse.Namespace) -> int:
 
 
 def _format_importance(importance: float) -> str:
-    return f"{importance:.0f}" if float(importance).is_integer() else f"{importance:.1f}"
+    return (
+        f"{importance:.0f}" if float(importance).is_integer() else f"{importance:.1f}"
+    )
 
 
 def _print_queue_summary(pending: list[review_queue.QueueRecord]) -> None:
@@ -1153,6 +1169,7 @@ def _run_start_pipeline(
     sources: dict[str, str],
     args: argparse.Namespace,
     queue_dir: Path,
+    imap_accounts: dict[str, review_queue.ImapAccountRef] | None = None,
 ) -> int:
     """Process ``emails`` into the queue with a progress bar, rank, summarize.
 
@@ -1281,6 +1298,7 @@ def _run_start_pipeline(
                         ranked_by=ranking.ranked_by,
                         source=sources.get(o.email.id, ""),
                         processed_at=now,
+                        imap_account=(imap_accounts or {}).get(o.email.id),
                     )
                 )
             review_queue.append_records(queue_dir, new_records)
@@ -1346,6 +1364,11 @@ def _cmd_start(args: argparse.Namespace) -> int:
 def _cmd_start_imap(args: argparse.Namespace) -> int:
     """Process unread IMAP mail into the queue (read-only connection)."""
     queue_dir = Path(args.queue_dir)
+    host = os.environ.get("IMAP_HOST", "").strip()
+    user = os.environ.get("IMAP_USER", "").strip()
+    drafts_folder = (
+        os.environ.get("IMAP_DRAFTS_FOLDER", "").strip() or DEFAULT_DRAFTS_FOLDER
+    )
     try:
         with console.status(
             f"[cyan]Fetching unread (last {args.days} days) via IMAP…",
@@ -1361,11 +1384,41 @@ def _cmd_start_imap(args: argparse.Namespace) -> int:
     if args.limit is not None:
         emails = emails[: args.limit]
     sources = {e.id: "imap" for e in emails}
+    account = (
+        review_queue.ImapAccountRef(
+            host=host,
+            user=user,
+            drafts_folder=drafts_folder,
+        )
+        if host and user
+        else None
+    )
+    imap_accounts = {e.id: account for e in emails} if account else None
     console.print(
         f"[dim]IMAP returned {len(fetched)} unread email(s); "
         f"{len(emails)} new to process[/]"
     )
-    return _run_start_pipeline(emails, sources, args, queue_dir)
+    return _run_start_pipeline(emails, sources, args, queue_dir, imap_accounts)
+
+
+def run_queued_pipeline(
+    *, source: str, inbox_dir: Path, queue_dir: Path, days: int = 7
+) -> int:
+    """Run the queue-producing pipeline for the CLI or local web API."""
+    args = argparse.Namespace(
+        limit=None,
+        anonymizer="combined",
+        task=DEFAULT_PROCESS_TASK,
+        config=None,
+        queue_dir=str(queue_dir),
+        folder=str(inbox_dir),
+        days=days,
+    )
+    if source == "mbox":
+        return _cmd_start(args)
+    if source == "imap":
+        return _cmd_start_imap(args)
+    raise ValueError(f"unknown pipeline source: {source!r}")
 
 
 def _cmd_reset(args: argparse.Namespace) -> int:
@@ -1405,8 +1458,7 @@ def _cmd_reset(args: argparse.Namespace) -> int:
     for path in existing:
         path.unlink()
     console.print(
-        f"[green]Queue reset[/] — deleted "
-        f"{', '.join(str(p) for p in existing)}"
+        f"[green]Queue reset[/] — deleted {', '.join(str(p) for p in existing)}"
     )
     return 0
 
@@ -1438,7 +1490,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
     for i, rec in enumerate(pending, start=1):
         p = processed_from_record(rec)
         header = Text(f"[{i}/{len(pending)}]  ", style="bold")
-        header.append(f"importance {_format_importance(rec.importance)}", style="bold cyan")
+        header.append(
+            f"importance {_format_importance(rec.importance)}", style="bold cyan"
+        )
         if rec.importance_reason:
             header.append(f" — {rec.importance_reason}", style="dim")
         console.print(header)
@@ -1458,7 +1512,14 @@ def _cmd_review(args: argparse.Namespace) -> int:
         if action == "edit":
             draft_to_save = _edit_draft(draft_to_save)
         if action in ("approve", "edit") and draft_to_save.strip():
-            saved_path = _persist_approved(p, draft_to_save, out_dir, rec.source)
+            try:
+                saved_path = _persist_approved(
+                    p, draft_to_save, out_dir, rec.source, rec.imap_account
+                )
+            except ImapAccountMismatchError as exc:
+                console.print(f"  [yellow]{exc}[/]")
+                console.print()
+                continue
             approved += 1
             console.print(f"  [green]saved →[/] {saved_path}")
         elif action == "reject":

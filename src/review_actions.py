@@ -38,10 +38,10 @@ class ProcessedEmail:
     result: TriageResult
     decision: EscalationDecision
     draft: str | None
-    provenance: str            # "local" or "Claude"
-    mapping: dict[str, str]    # placeholder -> original (empty unless escalated)
+    provenance: str  # "local" or "Claude"
+    mapping: dict[str, str]  # placeholder -> original (empty unless escalated)
     claude_used: bool
-    error: str | None          # escalation-path error note, if any
+    error: str | None  # escalation-path error note, if any
 
 
 @dataclass
@@ -56,6 +56,10 @@ class PersistOutcome:
     txt_path: Path
     note: str | None
     warning: str | None
+
+
+class ImapAccountMismatchError(RuntimeError):
+    """The queued email belongs to a different IMAP account than the active one."""
 
 
 def processed_from_record(rec: review_queue.QueueRecord) -> ProcessedEmail:
@@ -157,7 +161,11 @@ def source_is_imap(source: str) -> bool:
 
 
 def persist_approved(
-    p: ProcessedEmail, draft: str, out_dir: Path, source: str
+    p: ProcessedEmail,
+    draft: str,
+    out_dir: Path,
+    source: str,
+    imap_account: review_queue.ImapAccountRef | None = None,
 ) -> PersistOutcome:
     """Persist an approved draft, routing by where the email came from.
 
@@ -173,12 +181,25 @@ def persist_approved(
     The routed step is best-effort: a failure is reported in the outcome but
     never blocks the review, and nothing here ever sends the mail.
     """
+    if source_is_imap(source) and imap_account is not None:
+        current_host = os.environ.get("IMAP_HOST", "").strip()
+        current_user = os.environ.get("IMAP_USER", "").strip()
+        if (current_host, current_user) != (imap_account.host, imap_account.user):
+            raise ImapAccountMismatchError(
+                "this email was fetched from a different IMAP account; "
+                "reconnect that account before approving its draft"
+            )
+
     txt_path = save_approved_draft(p, draft, out_dir)
     note: str | None = None
     warning: str | None = None
     if source_is_imap(source):
         try:
-            append_to_drafts(build_reply_message(p, draft).as_bytes())
+            raw = build_reply_message(p, draft).as_bytes()
+            if imap_account is not None:
+                append_to_drafts(raw, folder=imap_account.drafts_folder)
+            else:
+                append_to_drafts(raw)
             note = "saved to IMAP Drafts (not sent)"
         except Exception as exc:
             warning = f"could not save to IMAP Drafts: {exc}"

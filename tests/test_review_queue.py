@@ -12,6 +12,7 @@ from pathlib import Path
 
 from src.ingestion.mbox_loader import Email
 from src.review_queue import (
+    ImapAccountRef,
     QueueRecord,
     append_records,
     append_reviewed,
@@ -65,6 +66,11 @@ def _record(
 
 def test_round_trip_preserves_every_field(tmp_path: Path) -> None:
     original = _record()
+    original.imap_account = ImapAccountRef(
+        host="imap.gmail.com",
+        user="me@gmail.com",
+        drafts_folder="[Gmail]/Drafts",
+    )
     append_records(tmp_path, [original])
     loaded = load_records(tmp_path)
     assert len(loaded) == 1
@@ -82,6 +88,7 @@ def test_round_trip_preserves_every_field(tmp_path: Path) -> None:
     assert rec.ranked_by == original.ranked_by
     assert rec.source == original.source
     assert rec.processed_at == original.processed_at
+    assert rec.imap_account == original.imap_account
 
 
 def test_malformed_lines_are_skipped(tmp_path: Path) -> None:
@@ -118,8 +125,12 @@ def test_pending_sorted_by_importance_then_age(tmp_path: Path) -> None:
         [
             _record("<low@h>", importance=2.0),
             _record("<hi@h>", importance=9.0),
-            _record("<mid-new@h>", importance=5.0, processed_at="2026-06-09T12:00:00+00:00"),
-            _record("<mid-old@h>", importance=5.0, processed_at="2026-06-09T08:00:00+00:00"),
+            _record(
+                "<mid-new@h>", importance=5.0, processed_at="2026-06-09T12:00:00+00:00"
+            ),
+            _record(
+                "<mid-old@h>", importance=5.0, processed_at="2026-06-09T08:00:00+00:00"
+            ),
         ],
     )
     pending = pending_records(tmp_path)

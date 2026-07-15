@@ -24,10 +24,15 @@ from typing import Any, Iterator
 import pytest
 
 from src import review_queue
-from src.api.server import ServerConfig, create_server, write_env_keys
+from src.api.server import (
+    ServerConfig,
+    create_server,
+    default_drafts_folder,
+    write_env_keys,
+)
 from src.ingestion.mbox_loader import Email
 from src.review_actions import save_approved_draft
-from src.review_queue import QueueRecord
+from src.review_queue import ImapAccountRef, QueueRecord
 from src.router.sensitivity_scorer import EscalationDecision
 from src.triage.classifier import TriageResult
 
@@ -70,6 +75,7 @@ def _record(
     source: str = "mbox:test.mbox",
     importance: float = 5.0,
     mapping: dict[str, str] | None = None,
+    imap_account: ImapAccountRef | None = None,
 ) -> QueueRecord:
     return QueueRecord(
         email=_email(email_id),
@@ -85,6 +91,7 @@ def _record(
         ranked_by="Claude",
         source=source,
         processed_at="2026-07-01T10:00:00+00:00",
+        imap_account=imap_account,
     )
 
 
@@ -147,7 +154,7 @@ class Api:
         raw_body: bytes | None = None,
         token: Any = _UNSET,
         host: str | None = None,
-        origin: str | None = None,
+        origin: Any = _UNSET,
         content_type: str | None = "application/json",
     ) -> tuple[int, Any, dict[str, str]]:
         headers: dict[str, str] = {}
@@ -156,8 +163,11 @@ class Api:
             headers["X-Triage-Token"] = tok
         if host is not None:
             headers["Host"] = host
-        if origin is not None:
-            headers["Origin"] = origin
+        request_origin = (
+            "http://localhost:5173" if origin is _UNSET and method == "POST" else origin
+        )
+        if request_origin is not None and request_origin is not _UNSET:
+            headers["Origin"] = request_origin
 
         data: bytes | None = None
         if raw_body is not None:
@@ -224,12 +234,28 @@ def test_queue_lists_pending_most_important_first(api: Api) -> None:
 
 
 def test_queue_response_has_no_mapping_or_headers(api: Api) -> None:
+    review_queue.append_records(
+        api.config.queue_dir,
+        [
+            _record(
+                "<account@host>",
+                draft="reply",
+                source="imap",
+                imap_account=ImapAccountRef(
+                    host="imap.gmail.com",
+                    user="private-account@gmail.com",
+                    drafts_folder="[Gmail]/Drafts",
+                ),
+            )
+        ],
+    )
     status, records, _ = api.get("/api/queue")
     assert status == 200
     raw = json.dumps(records)
     assert "mapping" not in raw
-    assert SECRET_PHONE not in raw          # the de-anonymization value itself
-    assert "References" not in raw           # raw email headers are omitted too
+    assert SECRET_PHONE not in raw  # the de-anonymization value itself
+    assert "References" not in raw  # raw email headers are omitted too
+    assert "private-account@gmail.com" not in raw
     assert records[0]["placeholder_count"] == 1
     assert records[1]["placeholder_count"] == 0
 
@@ -247,7 +273,11 @@ def test_queue_with_query_string_is_not_found(api: Api) -> None:
 def test_approve_writes_ledger_session_and_drafts(api: Api, tmp_path: Path) -> None:
     status, resp, _ = api.post(
         "/api/review",
-        {"email_id": "<a@host>", "action": "approve", "draft": "Thanks Sarah — will do."},
+        {
+            "email_id": "<a@host>",
+            "action": "approve",
+            "draft": "Thanks Sarah — will do.",
+        },
     )
     assert status == 200 and resp["ok"] is True
     txt_path = Path(resp["saved_path"])
@@ -288,8 +318,12 @@ def _processed_a() -> Any:
     from src.review_actions import processed_from_record
 
     return processed_from_record(
-        _record("<a@host>", draft="Thanks Sarah — will do.", importance=9.0,
-                mapping={"Phone_F1": SECRET_PHONE})
+        _record(
+            "<a@host>",
+            draft="Thanks Sarah — will do.",
+            importance=9.0,
+            mapping={"Phone_F1": SECRET_PHONE},
+        )
     )
 
 
@@ -336,6 +370,60 @@ def test_imap_source_approve_appends_to_drafts(
     assert not list(api.config.approved_dir.glob("*.eml"))  # no .eml for imap
 
 
+def test_imap_approval_uses_stored_folder(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account = ImapAccountRef(
+        host="imap.gmail.com",
+        user="me@gmail.com",
+        drafts_folder="[Gmail]/Drafts",
+    )
+    review_queue.append_records(
+        api.config.queue_dir,
+        [_record("<gmail@host>", draft="reply", source="imap", imap_account=account)],
+    )
+    monkeypatch.setenv("IMAP_HOST", account.host)
+    monkeypatch.setenv("IMAP_USER", account.user)
+    calls: list[str | None] = []
+
+    def _append(raw: bytes, *, folder: str | None = None) -> None:
+        calls.append(folder)
+
+    monkeypatch.setattr("src.review_actions.append_to_drafts", _append)
+    status, _, _ = api.post(
+        "/api/review",
+        {"email_id": "<gmail@host>", "action": "approve", "draft": "reply"},
+    )
+    assert status == 200
+    assert calls == ["[Gmail]/Drafts"]
+
+
+def test_imap_approval_blocks_the_wrong_active_account(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account = ImapAccountRef(
+        host="imap.gmail.com",
+        user="original@gmail.com",
+        drafts_folder="[Gmail]/Drafts",
+    )
+    review_queue.append_records(
+        api.config.queue_dir,
+        [_record("<wrong@host>", draft="reply", source="imap", imap_account=account)],
+    )
+    monkeypatch.setenv("IMAP_HOST", account.host)
+    monkeypatch.setenv("IMAP_USER", "other@gmail.com")
+    status, resp, _ = api.post(
+        "/api/review",
+        {"email_id": "<wrong@host>", "action": "approve", "draft": "reply"},
+    )
+    assert status == 409
+    assert "different IMAP account" in resp["error"]
+    assert "<wrong@host>" not in {
+        row["email_id"] for row in _reviewed_lines(api.config)
+    }
+    assert not list(api.config.approved_dir.glob("*wrong*"))
+
+
 def test_two_reviews_share_one_session_file(api: Api) -> None:
     api.post("/api/review", {"email_id": "<a@host>", "action": "reject", "draft": ""})
     api.post("/api/review", {"email_id": "<b@host>", "action": "reject", "draft": ""})
@@ -345,9 +433,13 @@ def test_two_reviews_share_one_session_file(api: Api) -> None:
 def test_review_validation_rejects_bad_input(api: Api) -> None:
     cases: list[Any] = [
         {"email_id": "<nope@host>", "action": "approve", "draft": "x"},  # unknown id
-        {"email_id": "<a@host>", "action": "send", "draft": "x"},        # bad action
-        {"email_id": "<a@host>", "action": "approve", "draft": ""},      # empty draft
-        {"email_id": "<b@host>", "action": "approve", "draft": "typed"},  # record has no draft
+        {"email_id": "<a@host>", "action": "send", "draft": "x"},  # bad action
+        {"email_id": "<a@host>", "action": "approve", "draft": ""},  # empty draft
+        {
+            "email_id": "<b@host>",
+            "action": "approve",
+            "draft": "typed",
+        },  # record has no draft
         {"email_id": "<a@host>", "action": "approve", "draft": "x" * 100_001},
         ["not", "a", "dict"],
     ]
@@ -387,9 +479,9 @@ def test_missing_or_wrong_token_is_403(api: Api) -> None:
 
 def test_dns_rebinding_host_is_403(api: Api) -> None:
     for bad_host in (
-        f"evil.example:{api.port}",   # rebound hostname
-        "127.0.0.1:9999",              # wrong port
-        "127.0.0.1",                   # missing port — not an exact match
+        f"evil.example:{api.port}",  # rebound hostname
+        "127.0.0.1:9999",  # wrong port
+        "127.0.0.1",  # missing port — not an exact match
     ):
         status, _, _ = api.get("/api/queue", host=bad_host)
         assert status == 403, bad_host
@@ -409,6 +501,11 @@ def test_cross_origin_post_is_403(api: Api) -> None:
     # The Vite dev origin is allowed (bad body proves the gate was passed).
     status, _, _ = api.post("/api/review", {"bad": 1}, origin="http://localhost:5173")
     assert status == 400
+
+
+def test_missing_origin_post_is_403(api: Api) -> None:
+    status, _, _ = api.post("/api/review", {"bad": 1}, origin=None)
+    assert status == 403
 
 
 def test_get_with_foreign_origin_is_still_served(api: Api) -> None:
@@ -436,6 +533,7 @@ def test_post_content_type_and_size_limits(api: Api) -> None:
                 f"POST /api/review HTTP/1.1\r\n"
                 f"Host: 127.0.0.1:{api.port}\r\n"
                 f"X-Triage-Token: {api.token}\r\n"
+                f"Origin: http://localhost:5173\r\n"
                 f"Content-Type: application/json\r\n"
                 f"Content-Length: {1024 * 1024 + 100}\r\n"
                 f"\r\n"
@@ -467,6 +565,94 @@ def test_token_file_is_0600_and_matches(api: Api) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Background processing — the web invokes the shared CLI pipeline
+# ---------------------------------------------------------------------------
+
+
+def _wait_for_job(api: Api, expected: str) -> dict[str, Any]:
+    for _ in range(200):
+        status, job, _ = api.get("/api/process/status")
+        assert status == 200
+        if job["status"] == expected:
+            return job
+        threading.Event().wait(0.01)
+    raise AssertionError(f"processing job never reached {expected!r}")
+
+
+def test_process_job_runs_shared_pipeline_and_rejects_overlap(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[tuple[ServerConfig, str, int]] = []
+
+    def _fake_run(config: ServerConfig, source: str, days: int) -> int:
+        calls.append((config, source, days))
+        started.set()
+        assert release.wait(timeout=5)
+        return 0
+
+    monkeypatch.setattr("src.api.server._run_pipeline", _fake_run)
+    status, idle, _ = api.get("/api/process/status")
+    assert status == 200 and idle["status"] == "idle"
+
+    status, job, _ = api.post("/api/process", {"source": "imap", "days": 14})
+    assert status == 202
+    assert started.wait(timeout=2)
+    assert job["source"] == "imap"
+    assert _wait_for_job(api, "running")["days"] == 14
+
+    status, resp, _ = api.post("/api/process", {"source": "mbox"})
+    assert status == 409
+    assert "already running" in resp["error"]
+
+    status, resp, _ = api.post(
+        "/api/settings/imap",
+        {
+            "host": "imap.gmail.com",
+            "user": "me@gmail.com",
+            "password": "app-password",
+            "folder": "INBOX",
+            "drafts_folder": "[Gmail]/Drafts",
+        },
+    )
+    assert status == 409
+    assert "while processing" in resp["error"]
+
+    release.set()
+    completed = _wait_for_job(api, "succeeded")
+    assert completed["exit_code"] == 0
+    assert calls == [(api.config, "imap", 14)]
+
+
+def test_process_job_reports_failure_without_leaking_exception(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail(config: ServerConfig, source: str, days: int) -> int:
+        raise RuntimeError("secret model detail")
+
+    monkeypatch.setattr("src.api.server._run_pipeline", _fail)
+    status, _, _ = api.post("/api/process", {"source": "mbox"})
+    assert status == 202
+    failed = _wait_for_job(api, "failed")
+    assert failed["exit_code"] == 1
+    assert "secret model detail" not in json.dumps(failed)
+
+
+def test_process_request_validation(api: Api) -> None:
+    for body in (
+        {},
+        {"source": "smtp"},
+        {"source": "imap", "days": 0},
+        {"source": "imap", "days": True},
+        {"source": "imap", "days": 366},
+    ):
+        status, resp, _ = api.post("/api/process", body)
+        assert status == 400, body
+        assert "error" in resp
+
+
+# ---------------------------------------------------------------------------
 # IMAP settings — .env round-trip
 # ---------------------------------------------------------------------------
 
@@ -474,7 +660,13 @@ def test_token_file_is_0600_and_matches(api: Api) -> None:
 @pytest.fixture()
 def clean_imap_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     """Sandbox the IMAP_* vars the handlers read and write via os.environ."""
-    for key in ("IMAP_HOST", "IMAP_USER", "IMAP_PASS", "IMAP_FOLDER"):
+    for key in (
+        "IMAP_HOST",
+        "IMAP_USER",
+        "IMAP_PASS",
+        "IMAP_FOLDER",
+        "IMAP_DRAFTS_FOLDER",
+    ):
         monkeypatch.setenv(key, "")
         monkeypatch.delenv(key)
     return monkeypatch
@@ -485,7 +677,13 @@ def test_settings_get_reports_password_presence_only(
 ) -> None:
     status, resp, _ = api.get("/api/settings/imap")
     assert status == 200
-    assert resp == {"host": "", "user": "", "folder": "INBOX", "password": "unset"}
+    assert resp == {
+        "host": "",
+        "user": "",
+        "folder": "INBOX",
+        "drafts_folder": "Drafts",
+        "password": "unset",
+    }
 
     clean_imap_env.setenv("IMAP_HOST", "imap.example.com")
     clean_imap_env.setenv("IMAP_PASS", "hunter2-app-password")
@@ -493,6 +691,12 @@ def test_settings_get_reports_password_presence_only(
     assert resp["host"] == "imap.example.com"
     assert resp["password"] == "set"
     assert "hunter2-app-password" not in json.dumps(resp)
+
+
+def test_provider_drafts_folder_defaults() -> None:
+    assert default_drafts_folder("imap.gmail.com") == "[Gmail]/Drafts"
+    assert default_drafts_folder("imap.mail.yahoo.com") == "Draft"
+    assert default_drafts_folder("outlook.office365.com") == "Drafts"
 
 
 def test_settings_post_round_trips_env_file(
@@ -520,14 +724,15 @@ def test_settings_post_round_trips_env_file(
 
     text = env_path.read_text()
     lines = text.splitlines()
-    assert "# keep this comment" in lines            # comments preserved
+    assert "# keep this comment" in lines  # comments preserved
     assert "ANTHROPIC_API_KEY=sk-test-123" in lines  # unrelated keys preserved
     assert "UNRELATED=1" in lines
-    assert "IMAP_HOST=imap.gmail.com" in lines       # updated in place
+    assert "IMAP_HOST=imap.gmail.com" in lines  # updated in place
     assert lines.index("IMAP_HOST=imap.gmail.com") == 2
     assert "IMAP_USER=me@gmail.com" in lines
     assert "IMAP_PASS=abcd efgh ijkl mnop" in lines
     assert "IMAP_FOLDER=INBOX" in lines
+    assert "IMAP_DRAFTS_FOLDER=[Gmail]/Drafts" in lines
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
     # os.environ reflects the save immediately.
@@ -536,7 +741,12 @@ def test_settings_post_round_trips_env_file(
     # Saving again with an empty password keeps the stored one.
     status, resp, _ = api.post(
         "/api/settings/imap",
-        {"host": "imap.gmail.com", "user": "me@gmail.com", "password": "", "folder": "INBOX"},
+        {
+            "host": "imap.gmail.com",
+            "user": "me@gmail.com",
+            "password": "",
+            "folder": "INBOX",
+        },
     )
     assert resp["password"] == "set"
     assert "IMAP_PASS=abcd efgh ijkl mnop" in env_path.read_text()
@@ -550,9 +760,24 @@ def test_settings_post_rejects_env_injection(
     before = env_path.read_text()
 
     bad_values = [
-        {"host": "imap.gmail.com\nEVIL=1", "user": "u", "password": "p", "folder": "INBOX"},
-        {"host": "imap.gmail.com", "user": "u\r\nEVIL=1", "password": "p", "folder": "INBOX"},
-        {"host": "imap.gmail.com", "user": "u", "password": "p\nEVIL=1", "folder": "INBOX"},
+        {
+            "host": "imap.gmail.com\nEVIL=1",
+            "user": "u",
+            "password": "p",
+            "folder": "INBOX",
+        },
+        {
+            "host": "imap.gmail.com",
+            "user": "u\r\nEVIL=1",
+            "password": "p",
+            "folder": "INBOX",
+        },
+        {
+            "host": "imap.gmail.com",
+            "user": "u",
+            "password": "p\nEVIL=1",
+            "folder": "INBOX",
+        },
         {"host": "imap.gmail.com", "user": "u", "password": "p", "folder": "INBOX\x00"},
         {"host": "not a hostname!", "user": "u", "password": "p", "folder": "INBOX"},
         {"host": "", "user": "u", "password": "p", "folder": "INBOX"},
@@ -601,6 +826,7 @@ class _FakeIMAP:
         self.args = args
         self.kwargs = kwargs
         self.logged_out = False
+        self.selected: list[tuple[str, bool]] = []
         _FakeIMAP.instances.append(self)
 
     def login(self, user: str, password: str) -> None:
@@ -609,6 +835,7 @@ class _FakeIMAP:
 
     def select(self, folder: str, readonly: bool = False) -> tuple[str, list[bytes]]:
         assert readonly is True  # the test endpoint must never open read-write
+        self.selected.append((folder, readonly))
         return "OK", [b"7"]
 
     def logout(self) -> None:
@@ -628,7 +855,12 @@ def test_imap_test_success(
 ) -> None:
     status, resp, _ = api.post(
         "/api/settings/imap/test",
-        {"host": "imap.gmail.com", "user": "me@gmail.com", "password": "pw", "folder": "INBOX"},
+        {
+            "host": "imap.gmail.com",
+            "user": "me@gmail.com",
+            "password": "pw",
+            "folder": "INBOX",
+        },
     )
     assert status == 200
     assert resp["ok"] is True
@@ -639,17 +871,24 @@ def test_imap_test_success(
     # Default certificate verification: no custom/unverified SSL context.
     assert "ssl_context" not in instance.kwargs
     assert set(instance.kwargs) <= {"timeout"}
+    assert instance.selected == [("INBOX", True), ("[Gmail]/Drafts", True)]
     assert instance.logged_out
 
 
 def test_imap_test_login_failure_never_echoes_credentials(
     api: Api, clean_imap_env: pytest.MonkeyPatch, fake_imap: type[_FakeIMAP]
 ) -> None:
-    fake_imap.login_error = "[AUTHENTICATIONFAILED] invalid credentials for me@gmail.com"
+    fake_imap.login_error = (
+        "[AUTHENTICATIONFAILED] invalid credentials for me@gmail.com"
+    )
     status, resp, _ = api.post(
         "/api/settings/imap/test",
-        {"host": "imap.gmail.com", "user": "me@gmail.com",
-         "password": "sekrit-pass", "folder": "INBOX"},
+        {
+            "host": "imap.gmail.com",
+            "user": "me@gmail.com",
+            "password": "sekrit-pass",
+            "folder": "INBOX",
+        },
     )
     assert status == 200
     assert resp["ok"] is False

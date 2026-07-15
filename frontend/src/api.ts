@@ -57,6 +57,7 @@ export interface ImapSettingsDTO {
   host: string
   user: string
   folder: string
+  drafts_folder: string
   password: 'set' | 'unset'
 }
 
@@ -124,6 +125,7 @@ export interface ImapSettingsForm {
   user: string
   password: string // '' = keep the saved one
   folder: string
+  drafts_folder: string
 }
 
 export function saveImapSettings(
@@ -134,4 +136,29 @@ export function saveImapSettings(
 
 export function testImapSettings(form: ImapSettingsForm): Promise<ImapTestResponse> {
   return post<ImapTestResponse>('/api/settings/imap/test', form)
+}
+
+export type ProcessingState = 'idle' | 'running' | 'succeeded' | 'failed'
+export type ProcessingSource = 'mbox' | 'imap'
+
+export interface ProcessingStatus {
+  id: string | null
+  source: ProcessingSource | null
+  days: number | null
+  status: ProcessingState
+  started_at: string | null
+  finished_at: string | null
+  message: string
+  exit_code: number | null
+}
+
+export function fetchProcessingStatus(): Promise<ProcessingStatus> {
+  return request<ProcessingStatus>('/api/process/status')
+}
+
+export function startProcessing(
+  source: ProcessingSource,
+  days = 7,
+): Promise<ProcessingStatus> {
+  return post<ProcessingStatus>('/api/process', { source, days })
 }

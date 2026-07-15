@@ -31,6 +31,29 @@ PROCESSED_FILENAME = "processed.jsonl"
 REVIEWED_FILENAME = "reviewed.jsonl"
 
 
+@dataclass(frozen=True)
+class ImapAccountRef:
+    """Non-secret IMAP routing metadata captured when an email is ingested."""
+
+    host: str
+    user: str
+    drafts_folder: str
+
+    @classmethod
+    def from_json_dict(cls, d: Any) -> "ImapAccountRef":
+        if not isinstance(d, dict):
+            raise ValueError("'imap_account' must be a dict or null")
+        values: dict[str, str] = {}
+        for key in ("host", "user", "drafts_folder"):
+            value = d.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"'imap_account.{key}' must be a non-empty string")
+            if len(value) > 320 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+                raise ValueError(f"'imap_account.{key}' is invalid")
+            values[key] = value.strip()
+        return cls(**values)
+
+
 @dataclass
 class QueueRecord:
     """One fully processed email waiting for (or done with) human review."""
@@ -39,15 +62,16 @@ class QueueRecord:
     result: TriageResult
     decision: EscalationDecision
     draft: str | None
-    provenance: str            # "local" or "Claude"
-    mapping: dict[str, str]    # placeholder -> original (empty unless escalated)
+    provenance: str  # "local" or "Claude"
+    mapping: dict[str, str]  # placeholder -> original (empty unless escalated)
     claude_used: bool
     error: str | None
-    importance: float          # 1 (ignore) .. 10 (urgent)
+    importance: float  # 1 (ignore) .. 10 (urgent)
     importance_reason: str
-    ranked_by: str             # "Claude" or a fallback description
-    source: str                # e.g. "mbox:enron_50.mbox" or "imap"
-    processed_at: str          # ISO timestamp
+    ranked_by: str  # "Claude" or a fallback description
+    source: str  # e.g. "mbox:enron_50.mbox" or "imap"
+    processed_at: str  # ISO timestamp
+    imap_account: ImapAccountRef | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -83,6 +107,13 @@ class QueueRecord:
         if isinstance(importance, bool) or not isinstance(importance, (int, float)):
             raise ValueError("'importance' must be a number")
 
+        raw_imap_account = d.get("imap_account")
+        imap_account = (
+            ImapAccountRef.from_json_dict(raw_imap_account)
+            if raw_imap_account is not None
+            else None
+        )
+
         return cls(
             email=email,
             result=result,
@@ -97,6 +128,7 @@ class QueueRecord:
             ranked_by=str(d.get("ranked_by", "")),
             source=str(d.get("source", "")),
             processed_at=str(d.get("processed_at", "")),
+            imap_account=imap_account,
         )
 
 
