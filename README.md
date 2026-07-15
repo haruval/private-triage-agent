@@ -145,10 +145,7 @@ make install builds the venv with python3.12 by default. If that exact
 executable isn't on your PATH, point it at your interpreter, e.g.
 make install PYTHON_BIN=python3 (must be Python 3.12+).
 
-## Usage
-
-
-## start + review (the main pipeline)
+## Usage: start + review (the main pipeline)
 
 ```sh
 source venv/bin/activate
@@ -305,9 +302,13 @@ The IMAP APPEND writes to the `Drafts` folder by default; for Gmail set
 ever makes, and it is APPEND-only, it just adds to your drafts
 folder. The final Send is always done yourself.
 
-## Testing Stuff
+## Development testing stuff
 
-### Build the test inbox (50 emails from Enron dataset)
+The commands below run against the Enron dev corpus (or any `.mbox`) rather
+than your own mail. They exist to inspect individual pipeline stages and run
+the tests.
+
+### Build the test inbox (50 emails from the Enron dataset)
 
 First fetch the dev corpus. This streams the ~423 MB CMU Enron tarball
 (cached under `data/raw/`) and samples it down to `data/dev_corpus.mbox`:
@@ -329,18 +330,14 @@ out.flush(); out.close()
 EOF
 ```
 
+### process (single command, no queue)
 
-## Old Test Commands
-
-
-## process emails (no queue)
-
-`process` is the single-command version: triage, escalate, and review in one
-sitting, nothing persisted between runs. For each email: triage locally →
-score sensitivity → if it escalates, anonymize, send to Claude, and rehydrate
-the reply. Every email is shown with its classification, escalation decision,
-and draft (tagged `local` or `Claude`); you then approve / edit / reject.
-Approved drafts and session logs land in the same places as `review`.
+`process` is the single-command version of the pipeline: triage, escalate, and
+review in one sitting, nothing persisted between runs. For each email: triage
+locally, score sensitivity, and if it escalates, anonymize, send to Claude, and
+rehydrate the reply. Every email is shown with its classification, escalation
+decision, and draft (tagged `local` or `Claude`); you then approve / edit /
+reject. Approved drafts and session logs land in the same places as `review`.
 **Nothing is ever sent automatically.** Escalations need `ANTHROPIC_API_KEY`
 (from `.env`); a run with nothing to escalate never calls Claude.
 
@@ -375,42 +372,55 @@ Other flags: `--task` (the instruction sent to Claude), `--config` (router YAML,
 default `configs/router.yaml`), `--approved-dir`, `--sessions-dir`, `--max-chars`
 (truncate the displayed original).
 
-## test triage cli
+### inspect triage stage
+
+```sh
 source venv/bin/activate
-### Default behavior (deterministic, first 5)
+
+# Deterministic, first 5
 python -m src.cli triage-emails data/dev_corpus.mbox --limit 5
 
-### Different random 5 each run
+# Different random 5 each run
 python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle
 
-### Same random 5 every run (reproducible)
+# Same random 5 every run (reproducible)
 python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle --seed 42
+```
 
-## test anonmymizer
+### preview anonymizer
+
+Shows exactly what would leave the box on escalation; `--anonymizer` picks the
+layer:
+
+```sh
 python -m src.cli anonymize-emails data/dev_corpus.mbox --limit 2
 python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer regex --limit 2
 python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer coref --shuffle --seed 42
+```
 
-## run the test suite
-source venv/bin/activate
+### Run the test suite
 
 ```sh
 make test    # run the test suite
 make clean   # remove venv and caches
 ```
 
-### All tests (includes the live Claude API integration tests; needs ANTHROPIC_API_KEY)
-python -m pytest
+Or drive pytest directly:
 
-### Live Claude API integration tests only
-python -m pytest -m integration
+```sh
+source venv/bin/activate
 
-### Everything except the live Claude API tests (offline, no key needed)
-python -m pytest -m "not integration"
+python -m pytest                       # all tests (live Claude tests need ANTHROPIC_API_KEY)
+python -m pytest -m integration        # only the live Claude API integration tests
+python -m pytest -m "not integration"  # everything offline, no key needed
+```
 
-## test utility eval (does anonymization preserve enough meaning for Claude?)
-### Default: 10 escalate-worthy emails through the raw / regex / full pipelines, judged by gemma3:27b
-python -m src.eval.utility_eval
+### Utility eval (does anonymization preserve enough meaning for Claude?)
 
-### Quick run: fewer emails, bounded mbox scan
-python -m src.eval.utility_eval --num-emails 3 --scan-limit 20
+Runs ~10 escalate-worthy emails through the raw / regex / full pipelines and
+scores the drafts with `gemma3:27b` as judge:
+
+```sh
+python -m src.eval.utility_eval                                # default
+python -m src.eval.utility_eval --num-emails 3 --scan-limit 20 # quick run
+```
