@@ -718,7 +718,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  queue dir   : {config.queue_dir}")
     print(f"  session log : {server.session_path}")
     print(f"  token file  : {config.token_path} (mode 0600 — proxy-only)")
-    print("Nothing is ever sent automatically. Ctrl-C to stop.")
+    print("Ctrl-C to stop.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

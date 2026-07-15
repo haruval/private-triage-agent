@@ -29,6 +29,7 @@ declare module 'react' {
   namespace JSX {
     interface IntrinsicElements {
       'md-filled-button': MdButtonProps
+      'md-filled-tonal-button': MdButtonProps
       'md-outlined-button': MdButtonProps
       'md-text-button': MdButtonProps
       'md-divider': MdProps

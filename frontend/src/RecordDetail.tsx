@@ -160,7 +160,7 @@ export default function RecordDetail({
             Reject
           </md-outlined-button>
           <span className="dim actions-hint">
-            Approve only writes the draft locally — nothing is ever sent.
+            Approve only writes the draft locally, nothing is ever sent.
           </span>
         </div>
       </article>

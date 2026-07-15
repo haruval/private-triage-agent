@@ -101,18 +101,30 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <span className="app-title md-typescale-title-large">Triage</span>
-        <md-outlined-button type="button" onClick={() => void handleUploadMbox()}>
+        <span className="app-title md-typescale-title-large">Private Triage Agent</span>
+        <md-filled-tonal-button
+          type="button"
+          className="topbar-action"
+          onClick={() => void handleUploadMbox()}
+        >
           Upload mbox
-        </md-outlined-button>
+        </md-filled-tonal-button>
         {view === 'queue' ? (
-          <md-outlined-button type="button" onClick={() => setView('settings')}>
+          <md-filled-tonal-button
+            type="button"
+            className="topbar-action"
+            onClick={() => setView('settings')}
+          >
             Connect IMAP
-          </md-outlined-button>
+          </md-filled-tonal-button>
         ) : (
-          <md-outlined-button type="button" onClick={() => setView('queue')}>
+          <md-filled-tonal-button
+            type="button"
+            className="topbar-action"
+            onClick={() => setView('queue')}
+          >
             ← Back to queue
-          </md-outlined-button>
+          </md-filled-tonal-button>
         )}
         <span className="spacer" />
         {view === 'queue' && (
