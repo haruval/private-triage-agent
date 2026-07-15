@@ -150,9 +150,6 @@ make install PYTHON_BIN=python3 (must be Python 3.12+).
 
 ## start + review (the main pipeline)
 
-`start` does all the slow work up front; `review` is the
-fast human pass.
-
 ```sh
 source venv/bin/activate
 
@@ -238,9 +235,7 @@ python -m src.cli reset -y    # skip the prompt
 
 
 ## Email Ingestion
-(The eventual single entry point will ask on first run: "1. Local
-MBOX files (Recommended) or 2. Connect your email". For now they are
-separate commands.)
+
 
 ### Method 1: Download your emails as an MBOX (recommended)
 If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
@@ -285,12 +280,11 @@ committed.
 ## Sending approved replies
 
 The pipeline never sends mail. Approving a draft persists it so you can send
-it yourself, and where it goes depends on how the email got in, so the reply
-always lands somewhere you can actually send it from. No flags to remember.
+it yourself, and where it goes depends on what email ingestion method you used.
 
 1. **Plain text (always).** Every approved draft is written to
    `data/approved_drafts/<message-id>.txt`.
-2. **mbox source gets a `.eml`.** When the email came from an `.mbox` file
+2. **mbox source creates a `.eml`.** When the email came from an `.mbox` file
    (`start`), an `.eml` is written next to the `.txt`.
    Double-clicking it opens a fully pre-filled reply (recipient, `Re:` subject,
    threading headers, body) in your email client,
@@ -306,9 +300,9 @@ python -m src.cli start data/inbox && python -m src.cli review   # approvals -> 
 python -m src.cli start-imap --days 7 && python -m src.cli review # approvals -> IMAP Drafts
 ```
 
-The IMAP APPEND writes to the `Drafts` folder by default; on Gmail set
+The IMAP APPEND writes to the `Drafts` folder by default; for Gmail set
 `IMAP_DRAFTS_FOLDER=[Gmail]/Drafts`. This is the only write the IMAP layer
-ever makes, and it is APPEND-only: it never sends, it just adds to your drafts
+ever makes, and it is APPEND-only, it just adds to your drafts
 folder. The final Send is always done yourself.
 
 ## Testing Stuff
