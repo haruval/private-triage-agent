@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+frontend/node_modules/
+frontend/dist/
+frontend/.dev-token

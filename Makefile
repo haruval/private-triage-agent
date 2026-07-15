@@ -3,7 +3,7 @@ PYTHON_BIN ?= python3.12
 PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 
-.PHONY: install lock test clean
+.PHONY: install lock test clean api web
 
 install:
 	@if [ -f requirements.lock.txt ]; then \
@@ -28,6 +28,18 @@ lock:
 
 test:
 	$(PYTHON) -m pytest
+
+# Web review UI: `make api` first (it writes frontend/.dev-token), then
+# `make web` in a second terminal. http://localhost:5173
+api:
+	$(PYTHON) -m src.api.server
+
+web:
+	@test -d frontend/node_modules || { \
+		echo "frontend/node_modules missing — run: cd frontend && npm install"; \
+		exit 1; \
+	}
+	cd frontend && npm run dev
 
 clean:
 	rm -rf $(VENV)

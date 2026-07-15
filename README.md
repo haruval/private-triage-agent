@@ -126,7 +126,10 @@ timing.
 - `src/router/` - sensitivity scoring, escalation logic, importance ranking
 - `src/delegate/` - Claude API client
 - `src/review_queue.py` - append-only processed/reviewed ledgers behind `start` + `review`
+- `src/review_actions.py` - shared persistence for review decisions (CLI + web)
+- `src/api/` - localhost-only HTTP API behind the web review UI
 - `src/eval/` - evaluation harness and leak detector
+- `frontend/` - Vite + React + Material Web review UI (talks to `src/api/`)
 - `tests/` - pytest tests
 - `data/` - gitignored: corpora, the `inbox/` mbox folder, `queue/` ledgers, approved drafts
 - `configs/` - YAML config files
@@ -231,6 +234,39 @@ everything (approved drafts and session logs are kept):
 python -m src.cli reset       # asks for confirmation
 python -m src.cli reset -y    # skip the prompt
 ```
+
+
+## Web UI (browser review queue)
+
+A local web version of `review`: the same pending queue, most important
+first, with the same approve / edit / reject semantics writing the same
+ledgers, session logs, and approved drafts. One-time setup:
+`cd frontend && npm install` (needs Node 20+).
+
+```sh
+make api    # terminal 1 — the Python API on 127.0.0.1:8765
+make web    # terminal 2 — the Vite dev server; open http://localhost:5173
+```
+
+Start the API first: it writes the per-run session token to
+`frontend/.dev-token`, which the Vite proxy injects into every `/api`
+request. Top-left actions: **Upload mbox** (opens Finder at `data/inbox` —
+drop `.mbox` files there, then run `python -m src.cli start`) and
+**Connect IMAP** (edits the `IMAP_*` values in `.env`; use an app-specific
+password, never your main account password).
+
+![web review UI](docs/images/web-review.png)
+
+Threat model, in brief: this is a **single-user, local-only** tool.
+Binding to localhost is not a security boundary — any web page in your
+browser can try to reach a localhost port via DNS rebinding or CSRF — so
+every request must carry the per-run token (which browser JavaScript never
+sees; the proxy adds it), pass an exact `Host` allowlist, and (for writes)
+an `Origin` allowlist. The browser also never receives the
+placeholder→original anonymization mapping or the IMAP password. Loopback
+is not a per-user boundary on a shared machine; the token is what actually
+gates access. And as everywhere else in this project: **nothing is ever
+sent automatically** — approving only writes drafts.
 
 
 ## Email Ingestion

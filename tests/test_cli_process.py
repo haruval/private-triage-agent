@@ -20,21 +20,18 @@ from typing import Any
 
 import pytest
 
-from src.cli import (
-    ProcessedEmail,
-    _build_processed,
-    _build_reply_message,
-    _email_payload,
-    _persist_approved,
-    _process_worker,
-    _reply_subject,
-    _safe_stem,
-    _save_approved_draft,
-    _save_approved_eml,
-    _session_record,
-    _source_is_imap,
-)
+from src.cli import _build_processed, _email_payload, _process_worker
 from src.ingestion.mbox_loader import Email
+from src.review_actions import (
+    ProcessedEmail,
+    build_reply_message,
+    persist_approved,
+    reply_subject,
+    safe_stem,
+    save_approved_draft,
+    session_record,
+    source_is_imap,
+)
 from src.router.sensitivity_scorer import EscalationDecision
 from src.triage.classifier import TriageResult
 
@@ -215,14 +212,14 @@ def _processed(draft: str, email_id: str = "<abc@host>") -> ProcessedEmail:
 
 
 def test_safe_stem_sanitizes_message_id() -> None:
-    stem = _safe_stem(_email(email_id="<a/b c@host>"))
+    stem = safe_stem(_email(email_id="<a/b c@host>"))
     assert "/" not in stem and " " not in stem and "<" not in stem
     assert stem  # non-empty
 
 
 def test_save_approved_draft_writes_header_and_body(tmp_path: Path) -> None:
     out = tmp_path / "approved"
-    path = _save_approved_draft(_processed("Hello there."), "Hello there.", out)
+    path = save_approved_draft(_processed("Hello there."), "Hello there.", out)
     assert path.exists()
     assert path.parent == out
     content = path.read_text()
@@ -233,8 +230,8 @@ def test_save_approved_draft_writes_header_and_body(tmp_path: Path) -> None:
 
 def test_save_approved_draft_does_not_clobber(tmp_path: Path) -> None:
     out = tmp_path / "approved"
-    p1 = _save_approved_draft(_processed("one"), "one", out)
-    p2 = _save_approved_draft(_processed("two"), "two", out)
+    p1 = save_approved_draft(_processed("one"), "one", out)
+    p2 = save_approved_draft(_processed("two"), "two", out)
     assert p1 != p2
     assert p1.exists() and p2.exists()
     assert "one" in p1.read_text()
@@ -247,16 +244,16 @@ def test_save_approved_draft_does_not_clobber(tmp_path: Path) -> None:
 
 
 def test_reply_subject_prefixes_once() -> None:
-    assert _reply_subject("Lunch") == "Re: Lunch"
-    assert _reply_subject("Re: Lunch") == "Re: Lunch"  # no doubling
-    assert _reply_subject("RE: Lunch") == "RE: Lunch"  # case-insensitive
-    assert _reply_subject("") == "Re: (no subject)"
+    assert reply_subject("Lunch") == "Re: Lunch"
+    assert reply_subject("Re: Lunch") == "Re: Lunch"  # no doubling
+    assert reply_subject("RE: Lunch") == "RE: Lunch"  # case-insensitive
+    assert reply_subject("") == "Re: (no subject)"
 
 
 def test_build_reply_message_headers_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IMAP_USER", "me@example.com")
     p = _processed("the reply", email_id="<orig@host>")
-    msg = _build_reply_message(p, "the reply")
+    msg = build_reply_message(p, "the reply")
     assert msg["To"] == "alice@example.com"       # reply goes to the sender
     assert msg["From"] == "me@example.com"          # from IMAP_USER
     assert msg["Subject"] == "Re: Hi"
@@ -271,31 +268,31 @@ def test_build_reply_message_skips_threading_for_synthetic_id(
 ) -> None:
     monkeypatch.delenv("IMAP_USER", raising=False)
     p = _processed("body", email_id="<sha1:deadbeef@local>")
-    msg = _build_reply_message(p, "body")
+    msg = build_reply_message(p, "body")
     assert "In-Reply-To" not in msg  # a content-hash id is not a real Message-ID
     assert "References" not in msg
     assert "From" not in msg  # no IMAP_USER set -> client fills it in
 
 
 # ---------------------------------------------------------------------------
-# _persist_approved routing (mbox -> .eml, imap -> IMAP Drafts)
+# persist_approved routing (mbox -> .eml, imap -> IMAP Drafts)
 # ---------------------------------------------------------------------------
 
 
-def test_source_is_imap() -> None:
-    assert _source_is_imap("imap")
-    assert _source_is_imap("imap:INBOX")
-    assert not _source_is_imap("mbox:enron_50.mbox")
-    assert not _source_is_imap("")  # unknown/legacy -> treat as mbox
+def testsource_is_imap() -> None:
+    assert source_is_imap("imap")
+    assert source_is_imap("imap:INBOX")
+    assert not source_is_imap("mbox:enron_50.mbox")
+    assert not source_is_imap("")  # unknown/legacy -> treat as mbox
 
 
 def test_persist_mbox_source_writes_eml_no_imap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[bytes] = []
-    monkeypatch.setattr("src.cli.append_to_drafts", lambda raw: calls.append(raw))
+    monkeypatch.setattr("src.review_actions.append_to_drafts", lambda raw: calls.append(raw))
     out = tmp_path / "approved"
-    txt = _persist_approved(_processed("hi"), "hi", out, "mbox:enron_50.mbox")
+    txt = persist_approved(_processed("hi"), "hi", out, "mbox:enron_50.mbox").txt_path
     assert txt.suffix == ".txt" and txt.exists()
     assert list(out.glob("*.eml"))  # .eml emitted for mbox
     assert calls == []              # never touches IMAP
@@ -305,9 +302,9 @@ def test_persist_imap_source_appends_draft_no_eml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[bytes] = []
-    monkeypatch.setattr("src.cli.append_to_drafts", lambda raw: calls.append(raw))
+    monkeypatch.setattr("src.review_actions.append_to_drafts", lambda raw: calls.append(raw))
     out = tmp_path / "approved"
-    txt = _persist_approved(_processed("hi"), "hi", out, "imap:INBOX")
+    txt = persist_approved(_processed("hi"), "hi", out, "imap:INBOX").txt_path
     assert txt.suffix == ".txt" and txt.exists()
     assert not list(out.glob("*.eml"))  # no .eml for imap
     assert len(calls) == 1               # appended to Drafts once
@@ -319,16 +316,16 @@ def test_persist_imap_append_failure_does_not_block(
     def _boom(raw: bytes) -> None:
         raise RuntimeError("IMAP APPEND to 'Drafts' failed")
 
-    monkeypatch.setattr("src.cli.append_to_drafts", _boom)
+    monkeypatch.setattr("src.review_actions.append_to_drafts", _boom)
     out = tmp_path / "approved"
     # The .txt still lands even though the Drafts APPEND raised.
-    txt = _persist_approved(_processed("hi"), "hi", out, "imap")
+    txt = persist_approved(_processed("hi"), "hi", out, "imap").txt_path
     assert txt.exists() and "hi" in txt.read_text()
 
 
 def test_persist_eml_and_txt_share_stem(tmp_path: Path) -> None:
     out = tmp_path / "approved"
-    txt = _persist_approved(_processed("hi", email_id="<m@h>"), "hi", out, "mbox:x")
+    txt = persist_approved(_processed("hi", email_id="<m@h>"), "hi", out, "mbox:x").txt_path
     eml = next(out.glob("*.eml"))
     assert eml.stem == txt.stem
 
@@ -347,7 +344,7 @@ def test_session_record_shape_is_json_serializable() -> None:
         claude_client=_EchoClaude(),
         task="reply",
     )
-    rec = _session_record(p, action="approve", saved_path=Path("data/approved_drafts/x.txt"))
+    rec = session_record(p, action="approve", saved_path=Path("data/approved_drafts/x.txt"))
     # Round-trips through JSON (the log is JSONL).
     loaded = json.loads(json.dumps(rec))
     assert loaded["email_id"] == "<abc@host>"
@@ -361,18 +358,18 @@ def test_session_record_shape_is_json_serializable() -> None:
 
 
 def test_session_record_no_saved_path() -> None:
-    rec = _session_record(_processed("d"), action="reject", saved_path=None)
+    rec = session_record(_processed("d"), action="reject", saved_path=None)
     assert rec["approved_path"] is None
     assert rec["action"] == "reject"
 
 
 # ---------------------------------------------------------------------------
-# _processed_from_record  (review's rebuild of a stored queue record)
+# processed_from_record  (review's rebuild of a stored queue record)
 # ---------------------------------------------------------------------------
 
 
 def test_processed_from_record_round_trip() -> None:
-    from src.cli import _processed_from_record
+    from src.review_actions import processed_from_record
     from src.review_queue import QueueRecord
 
     p = _build_processed(
@@ -398,7 +395,7 @@ def test_processed_from_record_round_trip() -> None:
         source="mbox:x.mbox",
         processed_at="2026-06-09T10:00:00+00:00",
     )
-    rebuilt = _processed_from_record(rec)
+    rebuilt = processed_from_record(rec)
     assert rebuilt == p
 
 

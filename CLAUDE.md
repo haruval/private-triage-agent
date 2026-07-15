@@ -23,7 +23,10 @@ src/triage/       Ollama client + local-model classifier
 src/anonymize/    regex / NER / coref anonymizers + (next) rehydrate
 src/router/       (next) sensitivity scoring + escalation
 src/delegate/     (next) Claude API client
+src/review_actions.py  shared review persistence (CLI review + web API)
+src/api/          stdlib-http localhost API behind the web review UI
 src/eval/         corpus loader, leak detector, (next) utility eval
+frontend/         Vite + React 19 + Material Web review UI (npm, gitignored deps)
 tests/            pytest
 scripts/          one-off runners (eval_pronoun_leak.py, fetch_enron.py, …)
 data/             gitignored — corpora, mbox files, eval JSONL
@@ -62,6 +65,23 @@ batch by importance (`src/router/importance.py`), and `review` walks the
 unreviewed queue most-important-first. The planned single entry point (first
 run asks: local mbox files vs. connect email over IMAP) is not built yet —
 `start` and `start-imap` are deliberately separate commands for now.
+
+**Prompt 18 (web review UI) is done** — `make api` runs
+`src/api/server.py` (stdlib `ThreadingHTTPServer`, 127.0.0.1:8765) and
+`make web` runs the Vite dev server on localhost:5173, which proxies `/api`
+and injects the per-run session token from `frontend/.dev-token`
+(gitignored; written 0600 by the API on startup — always start the API
+first). Every request passes a shared gate: exact `Host` allowlist, token
+compare, `Origin` allowlist on POSTs, JSON-only bodies with a 1 MiB cap.
+Queue responses go through a DTO that excludes `mapping` (only
+`placeholder_count` ships) and raw headers; `IMAP_PASS` is write-only
+("set"/"unset" in responses). Review decisions reuse
+`src/review_actions.py` — extracted from `src/cli.py` so terminal `review`
+and the web UI persist byte-identical artifacts (approved `.txt`/`.eml` or
+IMAP Drafts APPEND, `reviewed.jsonl`, `logs/sessions/<ts>_web.jsonl`). The
+settings page rewrites `IMAP_*` in `.env` in place (values validated
+against control characters — the loader is line-based, so a newline would
+inject keys — and the file is rewritten atomically at mode 0600).
 
 **Remaining: prompt 17** (final eval & writeup). The per-prompt notes below
 are kept for reference.
