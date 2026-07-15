@@ -2,8 +2,8 @@
 
 A privacy-preserving email triage agent. A local model (`gemma3:27b` via Ollama) handles most processing; sensitive content is anonymized before being sent to the Claude API for harder reasoning, then re-hydrated locally.
 
-<img src="docs/images/start.png" alt="start" width="400">
-<img src="docs/images/review.png" alt="review" width="400">
+<img src="docs/images/start.png" alt="start" width="600">
+<img src="docs/images/review.png" alt="review" width="600">
 
 
 ## What it does
