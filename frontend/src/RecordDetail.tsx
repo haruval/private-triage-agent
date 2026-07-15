@@ -47,7 +47,7 @@ export default function RecordDetail({
         <span className={`chip ${importanceClass(r.importance)}`}>
           importance {formatImportance(r.importance)}
         </span>
-        {r.importance_reason && <span className="dim"> — {r.importance_reason}</span>}
+        {r.importance_reason && <span className="dim"> {r.importance_reason}</span>}
       </div>
 
       <article className={`panel ${categoryClass(r.result.category)}`}>
@@ -145,20 +145,20 @@ export default function RecordDetail({
         )}
 
         <div className="actions">
-          <md-filled-button
+          <md-filled-tonal-button
             type="button"
             disabled={busy || !hasDraft || !draftText.trim()}
             onClick={() => onAction(r, approveAction, draftText)}
           >
             {edited ? 'Approve edit' : 'Approve'}
-          </md-filled-button>
-          <md-outlined-button
+          </md-filled-tonal-button>
+          <md-filled-tonal-button
             type="button"
             disabled={busy}
             onClick={() => onAction(r, 'reject', '')}
           >
             Reject
-          </md-outlined-button>
+          </md-filled-tonal-button>
           <span className="dim actions-hint">
             Approve only writes the draft locally, nothing is ever sent.
           </span>

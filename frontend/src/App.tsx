@@ -107,7 +107,7 @@ export default function App() {
           className="topbar-action"
           onClick={() => void handleUploadMbox()}
         >
-          Upload mbox
+          Upload .mbox
         </md-filled-tonal-button>
         {view === 'queue' ? (
           <md-filled-tonal-button
@@ -132,9 +132,13 @@ export default function App() {
             {records !== null && (
               <span className="dim pending-count">{list.length} pending</span>
             )}
-            <md-text-button type="button" onClick={() => void refresh()}>
+            <md-filled-tonal-button
+              type="button"
+              className="topbar-action"
+              onClick={() => void refresh()}
+            >
               Refresh
-            </md-text-button>
+            </md-filled-tonal-button>
           </>
         )}
       </header>
