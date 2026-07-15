@@ -34,6 +34,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import threading
@@ -67,6 +68,15 @@ MAX_DRAFT_CHARS = 100_000
 REVIEW_ACTIONS = frozenset({"approve", "edit", "reject"})
 
 IMAP_PROVIDER_TIMEOUT_SECS = 15
+
+_PICK_MBOX_SCRIPT = """\
+try
+  set selectedFile to choose file with prompt "Choose an .mbox file"
+  return POSIX path of selectedFile
+on error number -128
+  return ""
+end try
+"""
 
 _HOSTNAME_RE = re.compile(
     r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
@@ -379,8 +389,8 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
             body = self._read_body()
             if self.path == "/api/review":
                 self._handle_review(body)
-            elif self.path == "/api/open-inbox":
-                self._handle_open_inbox()
+            elif self.path == "/api/import-mbox":
+                self._handle_import_mbox()
             elif self.path == "/api/settings/imap":
                 self._handle_settings_post(body)
             elif self.path == "/api/settings/imap/test":
@@ -469,24 +479,88 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
-    # --- POST /api/open-inbox --------------------------------------------------
+    # --- POST /api/import-mbox ------------------------------------------------
 
-    def _handle_open_inbox(self) -> None:
-        """Open Finder at the fixed ``data/inbox`` folder.
+    def _handle_import_mbox(self) -> None:
+        """Choose an mbox in a native dialog and copy it into ``data/inbox``.
 
-        The path is decided entirely server-side; any client-supplied body is
-        ignored so this can never be steered at another directory.
+        The selected path comes only from a fixed AppleScript; any
+        client-supplied body is ignored. Existing inbox files are never
+        overwritten — a numeric suffix is added when names collide.
         """
+        try:
+            result = subprocess.run(  # list form, fixed argv, no shell
+                ["osascript", "-e", _PICK_MBOX_SCRIPT],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            self._send_json(500, {"error": "could not open the .mbox file picker"})
+            return
+        if result.returncode != 0:
+            self._send_json(500, {"error": "could not open the .mbox file picker"})
+            return
+
+        selected = result.stdout.rstrip("\r\n")
+        if not selected:
+            self._send_json(200, {"ok": True, "cancelled": True, "path": None})
+            return
+        if any(ord(c) < 32 or ord(c) == 127 for c in selected):
+            self._send_json(400, {"error": "selected path contains control characters"})
+            return
+
+        source = Path(selected)
+        if not source.is_absolute():
+            self._send_json(400, {"error": "selected path must be absolute"})
+            return
+        try:
+            source = source.resolve(strict=True)
+        except OSError:
+            self._send_json(400, {"error": "selected file does not exist"})
+            return
+        if not source.is_file():
+            self._send_json(400, {"error": "selected path is not a file"})
+            return
+        if source.suffix.lower() != ".mbox":
+            self._send_json(400, {"error": "selected file must end in .mbox"})
+            return
+
         inbox = self.server.config.inbox_dir
         with self.server.write_lock:
             inbox.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(  # list form, fixed argv, no shell
-            ["open", str(inbox)], check=False, capture_output=True, timeout=15
+            destination = inbox / f"{source.stem}.mbox"
+            if source == destination.resolve(strict=False):
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "cancelled": False,
+                        "path": str(destination),
+                        "filename": destination.name,
+                    },
+                )
+                return
+            suffix = 2
+            while destination.exists():
+                destination = inbox / f"{source.stem}-{suffix}.mbox"
+                suffix += 1
+            try:
+                shutil.copy2(source, destination)
+            except OSError:
+                self._send_json(500, {"error": "could not copy the selected .mbox"})
+                return
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "cancelled": False,
+                "path": str(destination),
+                "filename": destination.name,
+            },
         )
-        if result.returncode != 0:
-            self._send_json(500, {"error": "could not open the inbox folder"})
-            return
-        self._send_json(200, {"ok": True, "path": str(inbox)})
 
     # --- GET/POST /api/settings/imap -------------------------------------------
 

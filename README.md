@@ -250,8 +250,9 @@ make web    # terminal 2 — the Vite dev server; open http://localhost:5173
 
 Start the API first: it writes the per-run session token to
 `frontend/.dev-token`, which the Vite proxy injects into every `/api`
-request. Top-left actions: **Upload mbox** (opens Finder at `data/inbox` —
-drop `.mbox` files there, then run `python -m src.cli start`) and
+request. Top-left actions: **Upload .mbox** (opens a Finder file picker and
+copies the selected `.mbox` into `data/inbox`; then run
+`python -m src.cli start`) and
 **Connect IMAP** (edits the `IMAP_*` values in `.env`; use an app-specific
 password, never your main account password).
 

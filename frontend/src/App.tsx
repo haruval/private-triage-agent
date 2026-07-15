@@ -1,12 +1,12 @@
 // The single-page review app: a top bar with the two leading actions
-// (Upload mbox, Connect IMAP), the review queue as the main view, and the
+// (Upload .mbox, Connect IMAP), the review queue as the main view, and the
 // IMAP settings as a simple state-switched second view (no router). The
 // queue polls /api/queue every 15s; approving/rejecting advances to the
 // next pending record, exactly like the terminal `review` loop.
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { QueueRecordDTO, ReviewAction } from './api'
-import { fetchQueue, openInbox, postReview } from './api'
+import { fetchQueue, importMbox, postReview } from './api'
 import QueueList from './QueueList'
 import RecordDetail from './RecordDetail'
 import SettingsView from './SettingsView'
@@ -21,6 +21,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [edits, setEdits] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
+  const [uploading, setUploading] = useState(false)
   const [apiError, setApiError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef<number | undefined>(undefined)
@@ -90,11 +91,21 @@ export default function App() {
   )
 
   const handleUploadMbox = useCallback(async () => {
+    setUploading(true)
     try {
-      await openInbox()
-      showToast('Drop .mbox files into data/inbox, then run `python -m src.cli start`')
+      const resp = await importMbox()
+      if (resp.cancelled) {
+        showToast('Upload cancelled')
+      } else {
+        showToast(
+          `${resp.filename ?? 'Selected .mbox'} copied to data/inbox — run ` +
+            '`python -m src.cli start` to process it',
+        )
+      }
     } catch (err) {
       showToast(`error: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setUploading(false)
     }
   }, [showToast])
 
@@ -105,9 +116,10 @@ export default function App() {
         <md-filled-tonal-button
           type="button"
           className="topbar-action flat-tonal-action"
+          disabled={uploading}
           onClick={() => void handleUploadMbox()}
         >
-          Upload .mbox
+          {uploading ? 'Selecting…' : 'Upload .mbox'}
         </md-filled-tonal-button>
         {view === 'queue' ? (
           <md-filled-tonal-button

@@ -5,7 +5,7 @@ every path (queue, approved drafts, sessions, .env, token) pointed at
 tmp_path — requests go over actual HTTP so the security gate sees genuine
 headers. The security tests are the point here: the server fronts raw email
 bodies and credentials, and localhost is not a boundary. External effects
-(IMAP, Finder) are monkeypatched; no test touches the network.
+(IMAP, the native file picker) are monkeypatched; no test touches the network.
 """
 
 from __future__ import annotations
@@ -680,25 +680,112 @@ def test_imap_test_reports_missing_fields(
 
 
 # ---------------------------------------------------------------------------
-# POST /api/open-inbox — the path is fixed server-side
+# POST /api/import-mbox — native selection, validated local copy
 # ---------------------------------------------------------------------------
 
 
-def test_open_inbox_ignores_client_supplied_path(
-    api: Api, monkeypatch: pytest.MonkeyPatch
+def test_import_mbox_copies_native_selection_and_ignores_client_path(
+    api: Api, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    calls: list[list[str]] = []
+    source = tmp_path / "selected.mbox"
+    source.write_bytes(b"From sender@example.com\nSubject: hello\n\nbody\n")
+    calls: list[tuple[list[str], dict[str, Any]]] = []
 
     class _Done:
         returncode = 0
+        stdout = f"{source}\n"
 
     def _fake_run(argv: list[str], **kw: Any) -> _Done:
-        calls.append(list(argv))
+        calls.append((list(argv), kw))
         return _Done()
 
     monkeypatch.setattr("src.api.server.subprocess.run", _fake_run)
-    status, resp, _ = api.post("/api/open-inbox", {"path": "/etc", "cmd": "rm -rf"})
+    status, resp, _ = api.post(
+        "/api/import-mbox", {"path": "/etc/passwd", "cmd": "ignored"}
+    )
     assert status == 200
-    assert resp["path"] == str(api.config.inbox_dir)
-    assert calls == [["open", str(api.config.inbox_dir)]]
-    assert api.config.inbox_dir.is_dir()  # created so Finder has a target
+    assert resp == {
+        "ok": True,
+        "cancelled": False,
+        "path": str(api.config.inbox_dir / "selected.mbox"),
+        "filename": "selected.mbox",
+    }
+    assert (api.config.inbox_dir / "selected.mbox").read_bytes() == source.read_bytes()
+    argv, kwargs = calls[0]
+    assert argv[:2] == ["osascript", "-e"]
+    assert "choose file" in argv[2]
+    assert "/etc/passwd" not in argv[2]
+    assert kwargs == {
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": 300,
+    }
+
+
+def test_import_mbox_cancel_is_a_noop(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Cancelled:
+        returncode = 0
+        stdout = "\n"
+
+    monkeypatch.setattr(
+        "src.api.server.subprocess.run", lambda *args, **kwargs: _Cancelled()
+    )
+    status, resp, _ = api.post("/api/import-mbox", {})
+    assert status == 200
+    assert resp == {"ok": True, "cancelled": True, "path": None}
+    assert not api.config.inbox_dir.exists()
+
+
+def test_import_mbox_rejects_non_mbox_selection(
+    api: Api, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_text("not an mbox")
+
+    class _Done:
+        returncode = 0
+        stdout = f"{source}\n"
+
+    monkeypatch.setattr("src.api.server.subprocess.run", lambda *a, **kw: _Done())
+    status, resp, _ = api.post("/api/import-mbox", {})
+    assert status == 400
+    assert resp["error"] == "selected file must end in .mbox"
+    assert not api.config.inbox_dir.exists()
+
+
+def test_import_mbox_preserves_existing_file_with_numeric_suffix(
+    api: Api, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source = source_dir / "mail.mbox"
+    source.write_bytes(b"new")
+    api.config.inbox_dir.mkdir()
+    (api.config.inbox_dir / "mail.mbox").write_bytes(b"existing")
+
+    class _Done:
+        returncode = 0
+        stdout = f"{source}\n"
+
+    monkeypatch.setattr("src.api.server.subprocess.run", lambda *a, **kw: _Done())
+    status, resp, _ = api.post("/api/import-mbox", {})
+    assert status == 200
+    assert resp["filename"] == "mail-2.mbox"
+    assert (api.config.inbox_dir / "mail.mbox").read_bytes() == b"existing"
+    assert (api.config.inbox_dir / "mail-2.mbox").read_bytes() == b"new"
+
+
+def test_import_mbox_reports_picker_failure(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Failed:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr("src.api.server.subprocess.run", lambda *a, **kw: _Failed())
+    status, resp, _ = api.post("/api/import-mbox", {})
+    assert status == 500
+    assert resp["error"] == "could not open the .mbox file picker"

@@ -104,8 +104,15 @@ export function postReview(
   return post<ReviewResponse>('/api/review', { email_id: emailId, action, draft })
 }
 
-export function openInbox(): Promise<{ ok: boolean; path: string }> {
-  return post<{ ok: boolean; path: string }>('/api/open-inbox', {})
+export interface ImportMboxResponse {
+  ok: boolean
+  cancelled: boolean
+  path: string | null
+  filename?: string
+}
+
+export function importMbox(): Promise<ImportMboxResponse> {
+  return post<ImportMboxResponse>('/api/import-mbox', {})
 }
 
 export function fetchImapSettings(): Promise<ImapSettingsDTO> {
