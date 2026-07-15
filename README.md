@@ -234,7 +234,7 @@ python -m src.cli reset -y    # skip the prompt
 ## Email Ingestion
 
 
-### Method 1: Download your emails as an MBOX (recommended)
+### Method 1: Download your emails as an MBOX 
 If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
 1. Open Apple Mail.
 2. Go to Mailbox > New Mailbox in the top menu bar and create a local folder (e.g., name it "Weekly Export" and set the location to "On My Mac").
@@ -243,7 +243,7 @@ If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
 5. Right-click the "Weekly Export" mailbox in your sidebar and select Export Mailbox.
 6. Drag this file into data/inbox
 
-### Method 2 Use your real inbox over IMAP (read-only)
+### Method 2: Connect your real inbox over IMAP
 
 `start-imap` is `start` fed by unread mail from an IMAP account instead of a
 folder. 
@@ -270,9 +270,7 @@ IMAP_FOLDER=INBOX          # optional
 
 **USE A PASSWORD JUST FOR THIS, NOT YOUR REAL ACCOUNT PASSWORD. I WOULD NOT TRUST ME THAT MUCH.** For Gmail
 that's Google Account → Security → 2-Step Verification → App passwords; most
-providers have an equivalent. The password is only ever read from the
-environment, never put it on the command line or in a file that gets
-committed.
+providers have an equivalent. 
 
 ## Sending approved replies
 
