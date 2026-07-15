@@ -49,9 +49,6 @@ Claude responds. Because coreference models are imperfect, a held-out eval
 harness reports the residual PII leak rate per layer.
 
 
-Here's one example of an email going through the pipeline.
-
-
 You work in two steps. `start` processes new emails and prints an
 importance-ranked summary of what's waiting. `review` then walks through those drafts
 one by one so you can approve, edit, or reject each one.
@@ -60,6 +57,7 @@ one by one so you can approve, edit, or reject each one.
 python -m src.cli start    # process all new mail, rank by importance
 python -m src.cli review   # approve / edit / reject, most important first
 ```
+Here's one example of an email going through the pipeline.
 
 **1. Incoming email**
 
@@ -180,21 +178,21 @@ Review queue - 3 email(s) awaiting review
 │     │      │ from sarah.chen@northwind.com  •  action_required  •  draft:  │
 │     │      │ Claude  •  escalated                                          │
 │     │      │ Sarah Chen needs the Northwind contract redlines reviewed and │
-│     │      │ the $250,000 figure confirmed before Friday.                 │
-│     │      │   • Review the contract redlines                             │
-│     │      │   • Confirm the $250,000 figure                              │
+│     │      │ the $250,000 figure confirmed before Friday.                  │
+│     │      │   • Review the contract redlines                              │
+│     │      │   • Confirm the $250,000 figure                               │
 │     │      │ (Legal redlines plus a hard Friday deadline; needs a prompt   │
 │     │      │ reply.)                                                       │
 ├─────┼──────┼───────────────────────────────────────────────────────────────┤
 │   2 │    5 │ Lunch Thursday?                                               │
-│     │      │ from vivian@example.com  •  needs_reply  •  draft: local         │
-│     │      │ Vivian is asking whether you're free for lunch on Thursday.      │
-│     │      │   • Reply with your availability                             │
-│     │      │ (Routine scheduling; reply when convenient.)                 │
+│     │      │ from vivian@example.com  •  needs_reply  •  draft: local      │
+│     │      │ Vivian is asking whether you're free for lunch on Thursday.   │
+│     │      │   • Reply with your availability                              │
+│     │      │ (Routine scheduling; reply when convenient.)                  │
 ├─────┼──────┼───────────────────────────────────────────────────────────────┤
-│   3 │    2 │ Weekly newsletter                                            │
+│   3 │    2 │ Weekly newsletter                                             │
 │     │      │ from news@example.com  •  fyi  •  draft: local                │
-│     │      │ …                                                            │
+│     │      │ …                                                             │
 ```
 
 `review` walks through every processed-but-unreviewed email in that order: approve /
