@@ -147,18 +147,20 @@ export default function RecordDetail({
         <div className="actions">
           <md-filled-tonal-button
             type="button"
+            className="flat-tonal-action"
             disabled={busy || !hasDraft || !draftText.trim()}
             onClick={() => onAction(r, approveAction, draftText)}
           >
             {edited ? 'Approve edit' : 'Approve'}
           </md-filled-tonal-button>
-          <md-filled-tonal-button
+          <md-outlined-button
             type="button"
+            className="reject-action"
             disabled={busy}
             onClick={() => onAction(r, 'reject', '')}
           >
             Reject
-          </md-filled-tonal-button>
+          </md-outlined-button>
           <span className="dim actions-hint">
             Approve only writes the draft locally, nothing is ever sent.
           </span>

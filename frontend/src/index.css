@@ -186,6 +186,11 @@ code {
   --md-filled-tonal-button-container-shape: 12px;
 }
 
+/* Preserve the tonal hover tint without Material's hover elevation. */
+.flat-tonal-action {
+  --md-filled-tonal-button-hover-container-elevation: 0;
+}
+
 .spacer {
   flex: 1;
 }
@@ -534,12 +539,26 @@ code {
   font-size: 12px;
 }
 
+/* Reject uses the same green family as the tonal actions, but stays outlined. */
+.reject-action {
+  --md-outlined-button-label-text-color: var(--md-sys-color-on-secondary-container);
+  --md-outlined-button-focus-label-text-color: var(--md-sys-color-on-secondary-container);
+  --md-outlined-button-hover-label-text-color: var(--md-sys-color-on-secondary-container);
+  --md-outlined-button-pressed-label-text-color: var(--md-sys-color-on-secondary-container);
+  --md-outlined-button-outline-color: var(--md-sys-color-secondary);
+  --md-outlined-button-pressed-outline-color: var(--md-sys-color-secondary);
+  --md-outlined-button-hover-state-layer-color: var(--md-sys-color-secondary);
+  --md-outlined-button-pressed-state-layer-color: var(--md-sys-color-secondary);
+}
+
 /* ---- settings ---------------------------------------------------------------- */
 
 .settings-pane {
   overflow-y: auto;
   padding: 20px 24px;
-  max-width: 560px;
+  width: min(560px, 100%);
+  margin: 0 auto;
+  box-sizing: border-box;
 }
 
 .settings-intro {

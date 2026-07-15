@@ -101,10 +101,10 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <span className="app-title md-typescale-title-large">Private Triage Agent</span>
+        <span className="app-title md-typescale-title-large">private triage agent</span>
         <md-filled-tonal-button
           type="button"
-          className="topbar-action"
+          className="topbar-action flat-tonal-action"
           onClick={() => void handleUploadMbox()}
         >
           Upload .mbox
@@ -112,7 +112,7 @@ export default function App() {
         {view === 'queue' ? (
           <md-filled-tonal-button
             type="button"
-            className="topbar-action"
+            className="topbar-action flat-tonal-action"
             onClick={() => setView('settings')}
           >
             Connect IMAP
@@ -134,7 +134,7 @@ export default function App() {
             )}
             <md-filled-tonal-button
               type="button"
-              className="topbar-action"
+              className="topbar-action flat-tonal-action"
               onClick={() => void refresh()}
             >
               Refresh
