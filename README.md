@@ -300,8 +300,8 @@ folder. The final Send is always done yourself.
 
 ## Development testing stuff
 
-The commands below run against the Enron dev corpus (or any `.mbox`) rather
-than your own mail. They exist to inspect individual pipeline stages and run
+The commands below run against the Enron dev corpus (or any specified `.mbox`) rather
+than your own mail. They let you inspect individual pipeline stages and run
 the tests.
 
 ### Build the test inbox (50 emails from the Enron dataset)
