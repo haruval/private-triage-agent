@@ -8,13 +8,20 @@ environment variables so credentials never appear on a command line:
     IMAP_PASS    app-specific password — never the main account password
     IMAP_FOLDER  mailbox to read (optional, default INBOX)
 
-Read-only is enforced twice: the folder is selected with ``readonly=True``
-(the server rejects any flag change for the whole session) and message
-bodies are fetched with ``BODY.PEEK[]`` (which never sets ``\\Seen`` even on
-a writable session). Nothing here can mark read, delete, or send — there is
-no code path that issues STORE, EXPUNGE, or APPEND. Message bytes are parsed
-with the same converter the mbox loader uses, so both sources yield
-identical Email shapes.
+Fetching is read-only, enforced twice: the folder is selected with
+``readonly=True`` (the server rejects any flag change for the whole session)
+and message bodies are fetched with ``BODY.PEEK[]`` (which never sets
+``\\Seen`` even on a writable session). The fetch path issues no STORE or
+EXPUNGE, so it can never mark read or delete.
+
+The one write this module allows is :func:`append_to_drafts`: an explicit,
+opt-in APPEND of an approved reply into the account's Drafts folder, flagged
+``\\Draft``. It never sends, never marks read, and never deletes. All it does
+is leave a draft the user can open, edit, and send themselves from their own
+mail client, so the "nothing is sent automatically" guarantee holds.
+
+Message bytes are parsed with the same converter the mbox loader uses, so both
+sources yield identical Email shapes.
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from src.ingestion.mbox_loader import Email, email_from_message
 logger = logging.getLogger(__name__)
 
 DEFAULT_FOLDER = "INBOX"
+DEFAULT_DRAFTS_FOLDER = "Drafts"
 DEFAULT_DAYS = 7
 
 # IMAP SINCE dates use English month abbreviations regardless of locale;
@@ -137,6 +145,47 @@ def load_imap_unread(
 
         emails.sort(key=lambda e: e.date)
         return emails
+    finally:
+        if own_client:
+            try:
+                client.logout()
+            except Exception:
+                logger.warning("IMAP logout failed", exc_info=True)
+
+
+def append_to_drafts(
+    raw: bytes,
+    *,
+    folder: str | None = None,
+    client: Any = None,
+) -> None:
+    """APPEND a message into the account's Drafts folder, flagged ``\\Draft``.
+
+    This is the only write path in the module. It leaves a draft the user can
+    open and send from their own client; it issues no STORE, EXPUNGE, or send,
+    so it never marks read, deletes, or transmits anything.
+
+    The target comes from ``folder`` or ``IMAP_DRAFTS_FOLDER`` (default
+    ``Drafts``; Gmail wants ``[Gmail]/Drafts``). Pass a ``client`` for tests;
+    otherwise a connection is built from the IMAP_* environment and logged out
+    when done.
+    """
+    own_client = client is None
+    if own_client:
+        host, user, password, _ = _config_from_env()
+        client = imaplib.IMAP4_SSL(host)
+        client.login(user, password)
+    folder = (
+        folder
+        or os.environ.get("IMAP_DRAFTS_FOLDER", "").strip()
+        or DEFAULT_DRAFTS_FOLDER
+    )
+
+    try:
+        status, data = client.append(folder, r"(\Draft)", None, raw)
+        if status != "OK":
+            raise RuntimeError(f"IMAP APPEND to {folder!r} failed: {status} {data!r}")
+        logger.info("Appended a draft to IMAP folder %r", folder)
     finally:
         if own_client:
             try:

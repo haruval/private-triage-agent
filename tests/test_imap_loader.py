@@ -13,7 +13,11 @@ from typing import Any
 
 import pytest
 
-from src.ingestion.imap_loader import _imap_date, load_imap_unread
+from src.ingestion.imap_loader import (
+    _imap_date,
+    append_to_drafts,
+    load_imap_unread,
+)
 from src.ingestion.mbox_loader import Email
 
 
@@ -58,6 +62,12 @@ class _FakeIMAP:
     def logout(self) -> tuple[str, list[bytes]]:
         self.logged_out = True
         return ("BYE", [])
+
+    def append(
+        self, folder: str, flags: Any, date_time: Any, message: Any
+    ) -> tuple[str, list[bytes]]:
+        self.calls.append(("append", folder, flags, message))
+        return ("OK", [b"[APPENDUID 1 1]"])
 
 
 def test_selects_readonly_and_fetches_with_peek() -> None:
@@ -139,3 +149,50 @@ def test_missing_env_raises_naming_every_missing_var(
 def test_imap_date_uses_english_months() -> None:
     assert _imap_date(datetime(2026, 6, 9, tzinfo=timezone.utc)) == "09-Jun-2026"
     assert _imap_date(datetime(2025, 12, 1, tzinfo=timezone.utc)) == "01-Dec-2025"
+
+
+# --- append_to_drafts: the one and only write path -------------------------
+
+
+def test_append_to_drafts_uses_draft_flag_and_folder() -> None:
+    fake = _FakeIMAP({})
+    append_to_drafts(b"raw message bytes", folder="[Gmail]/Drafts", client=fake)
+    append_calls = [c for c in fake.calls if c[0] == "append"]
+    assert len(append_calls) == 1
+    _, folder, flags, message = append_calls[0]
+    assert folder == "[Gmail]/Drafts"
+    assert flags == r"(\Draft)"  # marks it a draft, never sends
+    assert message == b"raw message bytes"
+
+
+def test_append_to_drafts_defaults_folder_and_never_reads_or_sends() -> None:
+    fake = _FakeIMAP({})
+    append_to_drafts(b"x", client=fake)
+    methods = {c[0] for c in fake.calls}
+    assert methods == {"append"}  # no select/uid/store/expunge, no send
+    assert fake.calls[0][1] == "Drafts"  # DEFAULT_DRAFTS_FOLDER
+
+
+def test_append_to_drafts_honors_imap_drafts_folder_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IMAP_DRAFTS_FOLDER", "Custom/Drafts")
+    fake = _FakeIMAP({})
+    append_to_drafts(b"x", client=fake)
+    assert fake.calls[0][1] == "Custom/Drafts"
+
+
+def test_append_to_drafts_raises_on_non_ok() -> None:
+    class _RejectingIMAP(_FakeIMAP):
+        def append(self, folder, flags, date_time, message):  # type: ignore[no-untyped-def]
+            return ("NO", [b"[OVERQUOTA]"])
+
+    with pytest.raises(RuntimeError) as excinfo:
+        append_to_drafts(b"x", client=_RejectingIMAP({}))
+    assert "APPEND" in str(excinfo.value)
+
+
+def test_append_to_drafts_does_not_log_out_injected_client() -> None:
+    fake = _FakeIMAP({})
+    append_to_drafts(b"x", client=fake)
+    assert fake.logged_out is False

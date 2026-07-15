@@ -145,13 +145,7 @@ make install builds the venv with python3.12 by default. If that exact
 executable isn't on your PATH, point it at your interpreter, e.g.
 make install PYTHON_BIN=python3 (must be Python 3.12+).
 
-## Usage
-
-
-## start + review (the main pipeline)
-
-`start` does all the slow work up front; `review` is the
-fast human pass.
+## Usage: start + review (the main pipeline)
 
 ```sh
 source venv/bin/activate
@@ -205,7 +199,9 @@ Review queue - 3 email(s) awaiting review
 
 `review` walks through every processed-but-unreviewed email in that order: approve /
 edit / reject each draft, quit anytime, and the rest stays queued for next
-time. Approved drafts land in `data/approved_drafts/`; every decision is
+time. Approved drafts land in `data/approved_drafts/` (and, depending on where
+the email came from, a click-to-open `.eml` or an IMAP draft, see
+[Sending approved replies](#sending-approved-replies)); every decision is
 logged to `logs/sessions/<timestamp>.jsonl`.
 
 State lives in two append-only ledgers under `data/queue/`
@@ -233,10 +229,10 @@ everything (approved drafts and session logs are kept):
 python -m src.cli reset       # asks for confirmation
 python -m src.cli reset -y    # skip the prompt
 ```
+
+
 ## Email Ingestion
-(The eventual single entry point will ask on first run: "1. Local
-MBOX files (Recommended) or 2. Connect your email". For now they are
-separate commands.)
+
 
 ### Method 1: Download your emails as an MBOX (recommended)
 If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
@@ -257,9 +253,13 @@ python -m src.cli start-imap --days 7   # unread from the last 7 days
 python -m src.cli review
 ```
 
-The connection is **read-only** (stdlib `imaplib`): the folder is opened with
+Reading is **read-only** (stdlib `imaplib`): the folder is opened with
 `readonly=True` and bodies are fetched with `BODY.PEEK[]`, so nothing is ever
-marked read, deleted, or sent. Configure via environment variables:
+marked read, deleted, or sent. The one write the IMAP layer ever makes is
+saving an approved reply into your **Drafts** folder (see
+[Sending approved replies](#sending-approved-replies)); that APPEND is
+append-only and still never sends, marks read, or deletes. Configure via
+environment variables:
 
 ```
 IMAP_HOST=imap.gmail.com
@@ -274,9 +274,41 @@ providers have an equivalent. The password is only ever read from the
 environment, never put it on the command line or in a file that gets
 committed.
 
-## Testing Stuff
+## Sending approved replies
 
-### Build the test inbox (50 emails from Enron dataset)
+The pipeline never sends mail. Approving a draft persists it so you can send
+it yourself, and where it goes depends on what email ingestion method you used.
+
+1. **Plain text (always).** Every approved draft is written to
+   `data/approved_drafts/<message-id>.txt`.
+2. **mbox source creates a `.eml`.** When the email came from an `.mbox` file
+   (`start`), an `.eml` is written next to the `.txt`.
+   Double-clicking it opens a fully pre-filled reply (recipient, `Re:` subject,
+   threading headers, body) in your email client,
+   so you are one click from sending.
+3. **IMAP source goes to Drafts.** When the email came in over IMAP
+   (`start-imap`), the reply is APPENDed straight
+   into your account's **Drafts** folder, flagged as a draft, so it shows up in
+   Gmail / Apple Mail / Outlook ready to review and send, in the same client
+   the message came from. 
+
+```sh
+python -m src.cli start data/inbox && python -m src.cli review   # approvals -> .eml
+python -m src.cli start-imap --days 7 && python -m src.cli review # approvals -> IMAP Drafts
+```
+
+The IMAP APPEND writes to the `Drafts` folder by default; for Gmail set
+`IMAP_DRAFTS_FOLDER=[Gmail]/Drafts`. This is the only write the IMAP layer
+ever makes, and it is APPEND-only, it just adds to your drafts
+folder. The final Send is always done yourself.
+
+## Development testing stuff
+
+The commands below run against the Enron dev corpus (or any `.mbox`) rather
+than your own mail. They exist to inspect individual pipeline stages and run
+the tests.
+
+### Build the test inbox (50 emails from the Enron dataset)
 
 First fetch the dev corpus. This streams the ~423 MB CMU Enron tarball
 (cached under `data/raw/`) and samples it down to `data/dev_corpus.mbox`:
@@ -298,18 +330,14 @@ out.flush(); out.close()
 EOF
 ```
 
+### process (single command, no queue)
 
-## Old Test Commands
-
-
-## process emails (no queue)
-
-`process` is the single-command version: triage, escalate, and review in one
-sitting, nothing persisted between runs. For each email: triage locally →
-score sensitivity → if it escalates, anonymize, send to Claude, and rehydrate
-the reply. Every email is shown with its classification, escalation decision,
-and draft (tagged `local` or `Claude`); you then approve / edit / reject.
-Approved drafts and session logs land in the same places as `review`.
+`process` is the single-command version of the pipeline: triage, escalate, and
+review in one sitting, nothing persisted between runs. For each email: triage
+locally, score sensitivity, and if it escalates, anonymize, send to Claude, and
+rehydrate the reply. Every email is shown with its classification, escalation
+decision, and draft (tagged `local` or `Claude`); you then approve / edit /
+reject. Approved drafts and session logs land in the same places as `review`.
 **Nothing is ever sent automatically.** Escalations need `ANTHROPIC_API_KEY`
 (from `.env`); a run with nothing to escalate never calls Claude.
 
@@ -344,42 +372,55 @@ Other flags: `--task` (the instruction sent to Claude), `--config` (router YAML,
 default `configs/router.yaml`), `--approved-dir`, `--sessions-dir`, `--max-chars`
 (truncate the displayed original).
 
-## test triage cli
+### inspect triage stage
+
+```sh
 source venv/bin/activate
-### Default behavior (deterministic, first 5)
+
+# Deterministic, first 5
 python -m src.cli triage-emails data/dev_corpus.mbox --limit 5
 
-### Different random 5 each run
+# Different random 5 each run
 python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle
 
-### Same random 5 every run (reproducible)
+# Same random 5 every run (reproducible)
 python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle --seed 42
+```
 
-## test anonmymizer
+### preview anonymizer
+
+Shows exactly what would leave the box on escalation; `--anonymizer` picks the
+layer:
+
+```sh
 python -m src.cli anonymize-emails data/dev_corpus.mbox --limit 2
 python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer regex --limit 2
 python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer coref --shuffle --seed 42
+```
 
-## run the test suite
-source venv/bin/activate
+### Run the test suite
 
 ```sh
 make test    # run the test suite
 make clean   # remove venv and caches
 ```
 
-### All tests (includes the live Claude API integration tests; needs ANTHROPIC_API_KEY)
-python -m pytest
+Or drive pytest directly:
 
-### Live Claude API integration tests only
-python -m pytest -m integration
+```sh
+source venv/bin/activate
 
-### Everything except the live Claude API tests (offline, no key needed)
-python -m pytest -m "not integration"
+python -m pytest                       # all tests (live Claude tests need ANTHROPIC_API_KEY)
+python -m pytest -m integration        # only the live Claude API integration tests
+python -m pytest -m "not integration"  # everything offline, no key needed
+```
 
-## test utility eval (does anonymization preserve enough meaning for Claude?)
-### Default: 10 escalate-worthy emails through the raw / regex / full pipelines, judged by gemma3:27b
-python -m src.eval.utility_eval
+### Utility eval (does anonymization preserve enough meaning for Claude?)
 
-### Quick run: fewer emails, bounded mbox scan
-python -m src.eval.utility_eval --num-emails 3 --scan-limit 20
+Runs ~10 escalate-worthy emails through the raw / regex / full pipelines and
+scores the drafts with `gemma3:27b` as judge:
+
+```sh
+python -m src.eval.utility_eval                                # default
+python -m src.eval.utility_eval --num-emails 3 --scan-limit 20 # quick run
+```
