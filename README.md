@@ -27,14 +27,14 @@ select a single layer with `--anonymizer`.
   and `Northwind` into `Acme_O1`. NER runs on the regex-anonymized text, so the
   cheap exact patterns clean up first.
 - **Neural coreference resolution** (fastcoref's `biu-nlp/f-coref` model) that
-  links every pronoun back to the entity it refers to. Coref predicts *mention
-  clusters*, every span that points to the same entity, returned as character
+  links every pronoun back to the entity it refers to. Coref predicts mention
+  clusters, every span that points to the same entity, returned as character
   offsets, so "Sarah," "she," and "her" come back as one chain. Each pronoun
-  then inherits its placeholder from that cluster: the model finds the mention
+  then inherits its placeholder from that cluster and the model finds the mention
   in the chain that overlaps an entity NER already tagged (`Sarah → Alex_P1`)
-  and rewrites every other mention in the chain to the same `Alex_P1`. That
-  offset-based linking is what lets a bare "she" three sentences later resolve
-  to the *correct* person rather than a generic redaction. Pronouns aren't named
+  and rewrites every other mention in the chain to the same `Alex_P1`. This
+  offset-based linking lets a bare "she" three sentences later resolve
+  to the correct person rather than just being a generic redaction. Pronouns aren't named
   entities, so NER can't touch them; only the coref chain can.
   `scripts/eval_pronoun_leak.py` measures how many such leaks slip through with
   and without this layer. (`en_coreference_web_trf`, spaCy's own experimental
