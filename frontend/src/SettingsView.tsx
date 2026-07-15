@@ -120,7 +120,7 @@ export default function SettingsView({ showToast }: Props) {
         sends. Approved replies are only ever saved as drafts.
       </p>
       <p className="settings-warning">
-        Use an <strong>app-specific password</strong>, never your main account password.
+        Use an <strong>app-specific password</strong> (instructions in readme), do NOT give me your real account password!
       </p>
 
       <div className="settings-form">
