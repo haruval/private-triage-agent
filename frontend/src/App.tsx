@@ -45,7 +45,6 @@ export default function App() {
   const [processing, setProcessing] = useState<ProcessingStatus | null>(null)
   const [options, setOptions] = useState<ProcessingOptions>(DEFAULT_PROCESSING_OPTIONS)
   const [optionsOpen, setOptionsOpen] = useState(false)
-  const [resetOpen, setResetOpen] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [apiError, setApiError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
@@ -211,7 +210,7 @@ export default function App() {
     setResetting(true)
     try {
       const resp = await resetQueue()
-      setResetOpen(false)
+      setOptionsOpen(false)
       setRecords([])
       setSelectedId(null)
       setEdits({})
@@ -264,28 +263,20 @@ export default function App() {
             ← Back to queue
           </md-filled-tonal-button>
         )}
-        <md-outlined-button
+        <md-filled-tonal-button
           type="button"
-          className="topbar-action"
+          className="topbar-action flat-tonal-action"
           disabled={isProcessing}
           onClick={() => setOptionsOpen(true)}
         >
           {optionsCustomized ? 'Options *' : 'Options'}
-        </md-outlined-button>
+        </md-filled-tonal-button>
         <span className="spacer" />
         {view === 'queue' && (
           <>
             {records !== null && (
               <span className="dim pending-count">{list.length} pending</span>
             )}
-            <md-outlined-button
-              type="button"
-              className="topbar-action"
-              disabled={isProcessing || resetting}
-              onClick={() => setResetOpen(true)}
-            >
-              Reset queue
-            </md-outlined-button>
             <md-filled-tonal-button
               type="button"
               className="topbar-action flat-tonal-action"
@@ -364,40 +355,10 @@ export default function App() {
             showToast('Processing options saved for this session')
           }}
           onClose={() => setOptionsOpen(false)}
+          onReset={handleReset}
+          processing={isProcessing}
+          resetting={resetting}
         />
-      )}
-
-      {resetOpen && (
-        <div className="modal-overlay" role="dialog" aria-modal="true">
-          <div className="modal-card">
-            <h3 className="md-typescale-title-medium">Reset the review queue?</h3>
-            <p>
-              This deletes the processed and reviewed ledgers, so the next
-              processing run treats every email as new — including everything
-              already reviewed.
-            </p>
-            <p className="dim">
-              Approved drafts and session logs are not touched (same as the
-              terminal <code>reset</code> command).
-            </p>
-            <div className="modal-actions">
-              <md-outlined-button
-                type="button"
-                disabled={resetting}
-                onClick={() => setResetOpen(false)}
-              >
-                Cancel
-              </md-outlined-button>
-              <md-filled-button
-                type="button"
-                disabled={resetting}
-                onClick={() => void handleReset()}
-              >
-                {resetting ? 'Resetting…' : 'Reset queue'}
-              </md-filled-button>
-            </div>
-          </div>
-        </div>
       )}
 
       {toast && (
@@ -409,9 +370,9 @@ export default function App() {
   )
 }
 
-// Advanced processing options: the web mirror of the start/start-imap flags
-// (limit, anonymizer, task). Field edits are local until Save, so Cancel is
-// always a true no-op. The router config and eval flags stay terminal-only.
+// Options groups the advanced start/start-imap flags and the destructive queue
+// reset into separate sidebar sections. Field edits are local until Save, so
+// closing the popup is always a true no-op. Router/eval flags stay terminal-only.
 const ANONYMIZERS: { id: Anonymizer; label: string; hint: string }[] = [
   { id: 'regex', label: 'regex', hint: 'fixed-shape PII only (fastest)' },
   { id: 'combined', label: 'combined', hint: 'regex + NER (default)' },
@@ -422,11 +383,18 @@ function OptionsDialog({
   options,
   onSave,
   onClose,
+  onReset,
+  processing,
+  resetting,
 }: {
   options: ProcessingOptions
   onSave: (next: ProcessingOptions) => void
   onClose: () => void
+  onReset: () => Promise<void>
+  processing: boolean
+  resetting: boolean
 }) {
+  const [section, setSection] = useState<'advanced' | 'reset'>('advanced')
   const [limitText, setLimitText] = useState(
     options.limit === null ? '' : String(options.limit),
   )
@@ -453,58 +421,130 @@ function OptionsDialog({
   }
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true">
-      <div className="modal-card">
-        <h3 className="md-typescale-title-medium">Advanced processing options</h3>
-        <p className="dim">
-          Applied to every processing run started from this page (mbox uploads
-          and IMAP). Leave everything as-is for the defaults.
-        </p>
-        <div className="modal-form">
-          <md-outlined-text-field
-            label="Processing limit"
-            type="number"
-            min="1"
-            max={String(MAX_PROCESS_LIMIT)}
-            value={limitText}
-            placeholder="all new mail"
-            supporting-text="process at most N new emails per run"
-            onInput={(e) => setLimitText((e.currentTarget as MdTextFieldElement).value)}
-          />
-          <md-outlined-select
-            label="Anonymizer"
-            value={anonymizer}
-            onInput={(e) =>
-              setAnonymizer((e.currentTarget as MdSelectElement).value as Anonymizer)
-            }
-          >
-            {ANONYMIZERS.map((a) => (
-              <md-select-option key={a.id} value={a.id} selected={a.id === anonymizer}>
-                <div slot="headline">{a.label}</div>
-                <div slot="supporting-text">{a.hint}</div>
-              </md-select-option>
-            ))}
-          </md-outlined-select>
-          <md-outlined-text-field
-            label="Task instruction"
-            value={task}
-            placeholder="default: draft a concise, professional reply"
-            supporting-text="one line, sent to Claude for escalated emails (placeholders only, never raw PII)"
-            onInput={(e) => setTask((e.currentTarget as MdTextFieldElement).value)}
-          />
-        </div>
-        {error && (
-          <div className="settings-status settings-status-error" role="alert">
-            {error}
-          </div>
-        )}
-        <div className="modal-actions">
-          <md-outlined-button type="button" onClick={onClose}>
-            Cancel
-          </md-outlined-button>
-          <md-filled-button type="button" onClick={handleSave}>
-            Save options
-          </md-filled-button>
+    <div
+      className="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="options-dialog-title"
+    >
+      <div className="modal-card options-card">
+        <header className="options-dialog-header">
+          <h3 id="options-dialog-title" className="md-typescale-title-medium">
+            Options
+          </h3>
+        </header>
+        <div className="options-layout">
+          <nav className="options-sidebar" aria-label="Options sections">
+            <button
+              type="button"
+              className={`options-nav-button ${section === 'advanced' ? 'active' : ''}`}
+              aria-current={section === 'advanced' ? 'page' : undefined}
+              onClick={() => setSection('advanced')}
+            >
+              Advanced
+            </button>
+            <button
+              type="button"
+              className={`options-nav-button ${section === 'reset' ? 'active' : ''}`}
+              aria-current={section === 'reset' ? 'page' : undefined}
+              onClick={() => setSection('reset')}
+            >
+              Reset
+            </button>
+          </nav>
+
+          <section className="options-content">
+            {section === 'advanced' ? (
+              <>
+                <h4 className="md-typescale-title-medium">Advanced</h4>
+                <p className="dim">
+                  Applied to every processing run started from this page (mbox
+                  uploads and IMAP). Leave everything as-is for the defaults.
+                </p>
+                <div className="modal-form">
+                  <md-outlined-text-field
+                    label="Processing limit"
+                    type="number"
+                    min="1"
+                    max={String(MAX_PROCESS_LIMIT)}
+                    value={limitText}
+                    placeholder="all new mail"
+                    supporting-text="process at most N new emails per run"
+                    onInput={(e) =>
+                      setLimitText((e.currentTarget as MdTextFieldElement).value)
+                    }
+                  />
+                  <md-outlined-select
+                    label="Anonymizer"
+                    value={anonymizer}
+                    onInput={(e) =>
+                      setAnonymizer(
+                        (e.currentTarget as MdSelectElement).value as Anonymizer,
+                      )
+                    }
+                  >
+                    {ANONYMIZERS.map((a) => (
+                      <md-select-option
+                        key={a.id}
+                        value={a.id}
+                        selected={a.id === anonymizer}
+                      >
+                        <div slot="headline">{a.label}</div>
+                        <div slot="supporting-text">{a.hint}</div>
+                      </md-select-option>
+                    ))}
+                  </md-outlined-select>
+                  <md-outlined-text-field
+                    label="Task instruction"
+                    value={task}
+                    placeholder="default: draft a concise, professional reply"
+                    supporting-text="one line, sent to Claude for escalated emails (placeholders only, never raw PII)"
+                    onInput={(e) =>
+                      setTask((e.currentTarget as MdTextFieldElement).value)
+                    }
+                  />
+                </div>
+                {error && (
+                  <div className="settings-status settings-status-error" role="alert">
+                    {error}
+                  </div>
+                )}
+                <div className="modal-actions">
+                  <md-outlined-button type="button" onClick={onClose}>
+                    Cancel
+                  </md-outlined-button>
+                  <md-filled-button type="button" onClick={handleSave}>
+                    Save options
+                  </md-filled-button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h4 className="md-typescale-title-medium">Reset</h4>
+                <p>
+                  Reset the review queue so the next processing run treats every
+                  email as new — including everything already reviewed.
+                </p>
+                <div className="reset-warning">
+                  This permanently deletes the processed and reviewed ledgers.
+                  Approved drafts and session logs are not touched, matching the
+                  terminal <code>reset</code> command.
+                </div>
+                <div className="modal-actions">
+                  <md-outlined-button type="button" disabled={resetting} onClick={onClose}>
+                    Cancel
+                  </md-outlined-button>
+                  <md-filled-button
+                    type="button"
+                    disabled={processing || resetting}
+                    onClick={() => void onReset()}
+                  >
+                    {resetting ? 'Resetting…' : 'Reset queue'}
+                  </md-filled-button>
+                </div>
+              </>
+            )}
+          </section>
         </div>
       </div>
     </div>

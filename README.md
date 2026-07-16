@@ -255,12 +255,13 @@ request. Top-left actions: **Upload .mbox** (opens a Finder file picker and
 copies the selected `.mbox` into `data/inbox`, then starts processing),
 **Connect IMAP** (saves the `IMAP_*` values in `.env`, verifies the Inbox and
 Drafts folders read-only, and can fetch/process mail with one button; use an
-app-specific password, never your main account password), and **Options**
-(the `start`/`start-imap` flags: processing limit, anonymizer, task
-instruction — validated server-side against fixed allowlists). **Reset
-queue** (top-right, with a confirmation dialog) mirrors the terminal `reset`
-command: it clears the queue ledgers so the next run reprocesses everything,
-and never touches approved drafts or session logs. Processing runs in
+app-specific password, never your main account password), and **Options**.
+The Options popup groups the `start`/`start-imap` flags (processing limit,
+anonymizer, task instruction — validated server-side against fixed allowlists)
+under **Advanced**, with **Reset queue** in a separate **Reset** sidebar
+section. Reset mirrors the terminal command: it clears the queue ledgers so the
+next run reprocesses everything and never touches approved drafts or session
+logs. Processing runs in
 the API terminal, where detailed progress remains visible, while the browser
 shows job status and refreshes the queue when the run finishes.
 
