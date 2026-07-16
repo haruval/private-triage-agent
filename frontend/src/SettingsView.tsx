@@ -169,7 +169,8 @@ export default function SettingsView({ showToast, processing, onStartImap }: Pro
         sends. Approved replies are only ever saved as drafts.
       </p>
       <p className="settings-warning">
-        Use an <strong>app-specific password</strong> (instructions in readme), do NOT give me your real account password!
+        Use an <strong>app-specific IMAP password</strong>, do NOT give me your real account password!
+        For Gmail that's Google Account → Security → 2-Step Verification → App passwords; most providers have an equivalent. 
       </p>
 
       <div className="settings-form">

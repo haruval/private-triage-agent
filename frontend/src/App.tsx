@@ -307,7 +307,7 @@ export default function App() {
 
       {apiError && (
         <div className="api-error" role="alert">
-          API unreachable ({apiError}) — is the backend running? Start it with
+          API unreachable ({apiError}) - is the backend running? Start it with
           <code> make api</code>.
         </div>
       )}
@@ -323,7 +323,7 @@ export default function App() {
       ) : list.length === 0 ? (
         <div className="empty-state">
           <p className="md-typescale-title-medium">
-            Nothing to review — the queue is empty.
+            Nothing to review, the queue is empty.
           </p>
           <p className="dim">
             Upload an .mbox file or connect IMAP to fetch and process new mail.
