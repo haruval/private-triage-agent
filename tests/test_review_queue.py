@@ -211,6 +211,29 @@ def test_legacy_processed_line_derives_a_record_id(tmp_path: Path) -> None:
     assert processed_record_ids(tmp_path) == {loaded.record_id}
 
 
+def test_reviewed_ledger_skips_malformed_lines(tmp_path: Path) -> None:
+    """Bad reviewed.jsonl lines warn and skip — including valid JSON that is
+    not an object (`null`, a string, a list), which must not crash the whole
+    review surface (regression: reviewed_keys raised AttributeError)."""
+    rec = _record("<good@h>")
+    append_records(tmp_path, [rec, _record("<pending@h>")])
+    reviewed = tmp_path / "reviewed.jsonl"
+    reviewed.write_text(
+        "null\n"
+        '"just a string"\n'
+        "[1, 2]\n"
+        "{not json\n"
+        '{"action": "approve"}\n'  # object but no email_id / record_id
+        + json.dumps({"record_id": rec.record_id, "email_id": "<good@h>"})
+        + "\n"
+    )
+    keys = reviewed_keys(tmp_path)
+    assert keys.record_ids == {rec.record_id}
+    assert keys.legacy_email_ids == set()
+    assert reviewed_ids(tmp_path) == {"<good@h>"}
+    assert [r.email.id for r in pending_records(tmp_path)] == ["<pending@h>"]
+
+
 def test_legacy_reviewed_entry_suppresses_unscoped_records_only(
     tmp_path: Path,
 ) -> None:

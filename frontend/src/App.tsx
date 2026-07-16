@@ -82,12 +82,21 @@ export default function App() {
         const next = await fetchProcessingStatus()
         if (cancelled) return
         const current = processingRef.current
-        if (current?.status === 'running' && next.id !== current.id) return
         processingRef.current = next
         setProcessing(next)
         if (!processInitialized.current) {
           processInitialized.current = true
           if (next.status !== 'running') handledProcessId.current = next.id
+          return
+        }
+        if (current?.status === 'running' && next.id !== current.id) {
+          // The job we were watching is gone. The API rejects overlapping
+          // jobs, so a running job can only vanish when the server restarted
+          // mid-run — adopt the server's state instead of waiting forever
+          // for a dead job, and tell the user what happened.
+          if (next.status !== 'running') handledProcessId.current = next.id
+          showToast('Processing was interrupted (API restarted) — the queue may be partial')
+          void refresh()
           return
         }
         if (

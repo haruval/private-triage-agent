@@ -307,7 +307,11 @@ def reviewed_keys(queue_dir: Path) -> ReviewedKeys:
                     record_ids.add(record_id)
                 else:
                     legacy_email_ids.add(str(entry["email_id"]))
-            except (json.JSONDecodeError, KeyError, TypeError):
+            except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+                # AttributeError covers valid-JSON-but-not-an-object lines
+                # (`null`, a string, a list) — same warn-and-skip contract as
+                # every other ledger reader; one bad line must never take the
+                # review surface down.
                 logger.warning("%s: skipping bad reviewed entry", path)
     return ReviewedKeys(record_ids, legacy_email_ids)
 
