@@ -70,7 +70,7 @@ MAX_DRAFT_CHARS = 100_000
 
 REVIEW_ACTIONS = frozenset({"approve", "edit", "reject"})
 PROCESS_SOURCES = frozenset({"mbox", "imap"})
-PROCESS_ANONYMIZERS = frozenset({"regex", "combined", "coref"})
+PROCESS_ANONYMIZERS = frozenset({"regex", "regex+ner", "combined"})
 MAX_PROCESS_LIMIT = 10_000
 MAX_TASK_CHARS = 2_000
 

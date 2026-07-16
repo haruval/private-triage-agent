@@ -284,9 +284,9 @@ _PLACEHOLDER_RE = re.compile(r"[A-Z][a-z]+_[A-Z]\d+")
 def _build_anonymizer(name: str) -> tuple[Any, str]:
     if name == "regex":
         return RegexAnonymizer(), "regex"
-    if name == "combined":
+    if name == "regex+ner":
         return CombinedAnonymizer(), "regex+ner"
-    if name == "coref":
+    if name == "combined":
         from src.anonymize.coref_anonymizer import CorefAnonymizer
 
         return CorefAnonymizer(), "regex+ner+coref"
@@ -1434,7 +1434,7 @@ def run_queued_pipeline(
     ``limit``, ``anonymizer``, and ``task`` mirror the ``start``/``start-imap``
     flags; callers (the web API) validate them before they get here.
     """
-    if anonymizer not in ("regex", "combined", "coref"):
+    if anonymizer not in ("regex", "regex+ner", "combined"):
         raise ValueError(f"unknown anonymizer: {anonymizer!r}")
     args = argparse.Namespace(
         limit=limit,
@@ -1644,9 +1644,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     anon_parser.add_argument(
         "--anonymizer",
-        choices=["regex", "combined", "coref"],
+        choices=["regex", "regex+ner", "combined"],
         default="combined",
-        help="Anonymization strategy (default: combined = regex + NER)",
+        help="Anonymization strategy (default: combined = regex + NER + coref)",
     )
     anon_parser.add_argument(
         "--task",
@@ -1706,9 +1706,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         p.add_argument(
             "--anonymizer",
-            choices=["regex", "combined", "coref"],
+            choices=["regex", "regex+ner", "combined"],
             default="combined",
-            help="Anonymization strategy for escalations (default: combined = regex + NER)",
+            help="Anonymization strategy for escalations "
+            "(default: combined = regex + NER + coref)",
         )
         p.add_argument(
             "--task",
@@ -1797,9 +1798,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         p.add_argument(
             "--anonymizer",
-            choices=["regex", "combined", "coref"],
+            choices=["regex", "regex+ner", "combined"],
             default="combined",
-            help="Anonymization strategy for escalations (default: combined = regex + NER)",
+            help="Anonymization strategy for escalations "
+            "(default: combined = regex + NER + coref)",
         )
         p.add_argument(
             "--task",

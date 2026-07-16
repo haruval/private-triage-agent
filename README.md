@@ -14,8 +14,9 @@ draft, then **re-hydrated** locally. Nothing is sent automatically: every draft
 is reviewed by you first. 
 
 Under the hood, it runs three sequential layers, each covering a failure mode the
-others structurally miss. The default (`combined`) runs all three; you can
-select a single layer with `--anonymizer`.
+others structurally miss. The default (`combined`) runs all three; `--anonymizer`
+selects a smaller stack (`regex+ner` for the first two layers, `regex` for the
+first alone).
 
 - **Deterministic regex** for fixed-shape PII: emails, phone numbers, dollar
   amounts, dates. Fast and exact, but can't work on anything without a predictable
@@ -483,7 +484,7 @@ python -m src.cli process-old data/dev_corpus.mbox --limit 10
 # Present + log only, no approve/reject prompts (good for a quick look or CI)
 python -m src.cli process data/dev_corpus.mbox --limit 3 --no-input
 
-# Pick the anonymizer used for escalations (default: combined = regex + NER)
+# Pick the anonymizer used for escalations (default: combined = regex + NER + coref)
 python -m src.cli process data/dev_corpus.mbox --limit 5 --anonymizer regex
 
 # Reproducible random sample
@@ -514,13 +515,13 @@ python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle --seed 
 
 ### preview anonymizer
 
-Shows exactly what would leave the box on escalation; `--anonymizer` picks the
-layer:
+Shows exactly what would leave the box on escalation; `--anonymizer` picks how
+much of the stack runs:
 
 ```sh
 python -m src.cli anonymize-emails data/dev_corpus.mbox --limit 2
 python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer regex --limit 2
-python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer coref --shuffle --seed 42
+python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer regex+ner --shuffle --seed 42
 ```
 
 ### Run the test suite

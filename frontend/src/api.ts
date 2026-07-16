@@ -160,7 +160,7 @@ export function testImapSettings(form: ImapSettingsForm): Promise<ImapTestRespon
 
 export type ProcessingState = 'idle' | 'running' | 'succeeded' | 'failed'
 export type ProcessingSource = 'mbox' | 'imap'
-export type Anonymizer = 'regex' | 'combined' | 'coref'
+export type Anonymizer = 'regex' | 'regex+ner' | 'combined'
 
 export interface ProcessingStatus {
   id: string | null
