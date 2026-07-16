@@ -629,6 +629,18 @@ code {
   flex-wrap: wrap;
 }
 
+.imap-reset-confirmation {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.imap-reset-confirmation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 @media (max-width: 760px) {
   .processing-banner {
     grid-template-columns: 1fr;
