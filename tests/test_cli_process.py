@@ -261,12 +261,11 @@ def test_reply_subject_prefixes_once() -> None:
     assert reply_subject("") == "Re: (no subject)"
 
 
-def test_build_reply_message_headers_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("IMAP_USER", "me@example.com")
+def test_build_reply_message_headers_and_body() -> None:
     p = _processed("the reply", email_id="<orig@host>")
-    msg = build_reply_message(p, "the reply")
+    msg = build_reply_message(p, "the reply", sender="me@example.com")
     assert msg["To"] == "alice@example.com"  # reply goes to the sender
-    assert msg["From"] == "me@example.com"  # from IMAP_USER
+    assert msg["From"] == "me@example.com"  # the explicitly passed account
     assert msg["Subject"] == "Re: Hi"
     assert msg["In-Reply-To"] == "<orig@host>"  # threads to the original
     assert msg["References"] == "<orig@host>"
@@ -274,15 +273,24 @@ def test_build_reply_message_headers_and_body(monkeypatch: pytest.MonkeyPatch) -
     assert msg.get_content().strip() == "the reply"
 
 
-def test_build_reply_message_skips_threading_for_synthetic_id(
+def test_build_reply_message_ignores_global_imap_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("IMAP_USER", raising=False)
+    """No sender passed -> no From, even with an unrelated IMAP account
+    configured — the mail client must pick the sending account for mbox
+    replies, not whatever IMAP connection happens to be saved."""
+    monkeypatch.setenv("IMAP_USER", "unrelated-account@gmail.com")
+    msg = build_reply_message(_processed("body"), "body")
+    assert "From" not in msg
+    assert "unrelated-account@gmail.com" not in msg.as_string()
+
+
+def test_build_reply_message_skips_threading_for_synthetic_id() -> None:
     p = _processed("body", email_id="<sha1:deadbeef@local>")
     msg = build_reply_message(p, "body")
     assert "In-Reply-To" not in msg  # a content-hash id is not a real Message-ID
     assert "References" not in msg
-    assert "From" not in msg  # no IMAP_USER set -> client fills it in
+    assert "From" not in msg  # no sender passed -> client fills it in
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +303,17 @@ def testsource_is_imap() -> None:
     assert source_is_imap("imap:INBOX")
     assert not source_is_imap("mbox:enron_50.mbox")
     assert not source_is_imap("")  # unknown/legacy -> treat as mbox
+
+
+def _imap_env(monkeypatch: pytest.MonkeyPatch, account: ImapAccountRef) -> None:
+    monkeypatch.setenv("IMAP_HOST", account.host)
+    monkeypatch.setenv("IMAP_USER", account.user)
+
+
+def _gmail_account(user: str = "me@gmail.com") -> ImapAccountRef:
+    return ImapAccountRef(
+        host="imap.gmail.com", user=user, drafts_folder="[Gmail]/Drafts"
+    )
 
 
 def test_persist_mbox_source_writes_eml_no_imap(
@@ -311,31 +330,70 @@ def test_persist_mbox_source_writes_eml_no_imap(
     assert calls == []  # never touches IMAP
 
 
+def test_persist_mbox_eml_has_no_from_with_unrelated_imap_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An mbox approval while some other IMAP account is configured must not
+    stamp that account into the .eml's From header."""
+    _imap_env(monkeypatch, _gmail_account("unrelated@gmail.com"))
+    out = tmp_path / "approved"
+    persist_approved(_processed("hi"), "hi", out, "mbox:enron_50.mbox")
+    eml = next(out.glob("*.eml")).read_bytes().decode()
+    assert "unrelated@gmail.com" not in eml
+    assert not eml.startswith("From:") and "\nFrom:" not in eml
+
+
 def test_persist_imap_source_appends_draft_no_eml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    account = _gmail_account()
+    _imap_env(monkeypatch, account)
     calls: list[bytes] = []
-    monkeypatch.setattr(
-        "src.review_actions.append_to_drafts", lambda raw: calls.append(raw)
-    )
+
+    def _append(raw: bytes, *, folder: str | None = None) -> None:
+        calls.append(raw)
+
+    monkeypatch.setattr("src.review_actions.append_to_drafts", _append)
     out = tmp_path / "approved"
-    txt = persist_approved(_processed("hi"), "hi", out, "imap:INBOX").txt_path
+    txt = persist_approved(_processed("hi"), "hi", out, "imap:INBOX", account).txt_path
     assert txt.suffix == ".txt" and txt.exists()
     assert not list(out.glob("*.eml"))  # no .eml for imap
     assert len(calls) == 1  # appended to Drafts once
+    # The draft carries the stored account as From, not a global env read.
+    assert b"From: me@gmail.com" in calls[0]
 
 
 def test_persist_imap_append_failure_does_not_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def _boom(raw: bytes) -> None:
+    account = _gmail_account()
+    _imap_env(monkeypatch, account)
+
+    def _boom(raw: bytes, *, folder: str | None = None) -> None:
         raise RuntimeError("IMAP APPEND to 'Drafts' failed")
 
     monkeypatch.setattr("src.review_actions.append_to_drafts", _boom)
     out = tmp_path / "approved"
     # The .txt still lands even though the Drafts APPEND raised.
-    txt = persist_approved(_processed("hi"), "hi", out, "imap").txt_path
+    txt = persist_approved(_processed("hi"), "hi", out, "imap", account).txt_path
     assert txt.exists() and "hi" in txt.read_text()
+
+
+def test_persist_imap_without_account_metadata_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy queue records (imap source, no stored account) must not append a
+    draft into whatever account is configured now — the user is told to reject
+    and reprocess instead."""
+    _imap_env(monkeypatch, _gmail_account())
+    calls: list[bytes] = []
+    monkeypatch.setattr(
+        "src.review_actions.append_to_drafts", lambda raw, **kw: calls.append(raw)
+    )
+    with pytest.raises(ImapAccountMismatchError, match="reprocess"):
+        persist_approved(_processed("hi"), "hi", tmp_path, "imap", None)
+    assert calls == []
+    assert not list(tmp_path.glob("*.txt"))  # refused before anything was written
 
 
 def test_persist_imap_uses_ingested_account_and_drafts_folder(
@@ -529,8 +587,9 @@ def test_reset_deletes_both_ledgers(tmp_path: Path) -> None:
         reviewed_path,
     )
 
-    append_records(tmp_path, [_queue_record()])
-    append_reviewed(tmp_path, "<abc@host>", "approve", None)
+    record = _queue_record()
+    append_records(tmp_path, [record])
+    append_reviewed(tmp_path, record.record_id, "<abc@host>", "approve", None)
     assert processed_path(tmp_path).exists() and reviewed_path(tmp_path).exists()
 
     rc = main(["reset", "--queue-dir", str(tmp_path), "--yes"])

@@ -2,28 +2,36 @@
 // (Upload .mbox, Connect IMAP), the review queue as the main view, and the
 // IMAP settings as a simple state-switched second view (no router). The
 // queue polls /api/queue every 15s; approving/rejecting advances to the
-// next pending record, exactly like the terminal `review` loop.
+// next pending record, exactly like the terminal `review` loop. Records are
+// keyed by the opaque record_id — the same Message-ID can be pending once
+// per IMAP account, so email.id is display-only.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type {
+  Anonymizer,
+  ProcessingOptions,
   ProcessingSource,
   ProcessingStatus,
   QueueRecordDTO,
   ReviewAction,
 } from './api'
 import {
+  DEFAULT_PROCESSING_OPTIONS,
   fetchProcessingStatus,
   fetchQueue,
   importMbox,
   postReview,
+  resetQueue,
   startProcessing,
 } from './api'
+import type { MdSelectElement, MdTextFieldElement } from './declarations'
 import QueueList from './QueueList'
 import RecordDetail from './RecordDetail'
 import SettingsView from './SettingsView'
 
 const POLL_MS = 15_000
 const PROCESS_POLL_MS = 2_000
+const MAX_PROCESS_LIMIT = 10_000
 
 type View = 'queue' | 'settings'
 
@@ -35,6 +43,10 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [processing, setProcessing] = useState<ProcessingStatus | null>(null)
+  const [options, setOptions] = useState<ProcessingOptions>(DEFAULT_PROCESSING_OPTIONS)
+  const [optionsOpen, setOptionsOpen] = useState(false)
+  const [resetOpen, setResetOpen] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const [apiError, setApiError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef<number | undefined>(undefined)
@@ -106,13 +118,13 @@ export default function App() {
   }, [refresh, showToast])
 
   const list = useMemo(() => records ?? [], [records])
-  const selected = list.find((r) => r.email.id === selectedId) ?? list[0] ?? null
+  const selected = list.find((r) => r.record_id === selectedId) ?? list[0] ?? null
 
   const handleAction = useCallback(
     async (record: QueueRecordDTO, action: ReviewAction, draft: string) => {
       setBusy(true)
       try {
-        const resp = await postReview(record.email.id, action, draft)
+        const resp = await postReview(record.record_id, action, draft)
         const parts: string[] = []
         if (action === 'reject') {
           parts.push('rejected — nothing saved')
@@ -124,17 +136,17 @@ export default function App() {
         showToast(parts.join('  •  '))
 
         // Drop the reviewed record locally and advance to the next one.
-        const idx = list.findIndex((r) => r.email.id === record.email.id)
-        const next = list.filter((r) => r.email.id !== record.email.id)
+        const idx = list.findIndex((r) => r.record_id === record.record_id)
+        const next = list.filter((r) => r.record_id !== record.record_id)
         const nextSelected =
           next.length === 0
             ? null
-            : next[Math.min(Math.max(idx, 0), next.length - 1)].email.id
+            : next[Math.min(Math.max(idx, 0), next.length - 1)].record_id
         setRecords(next)
         setSelectedId(nextSelected)
         setEdits((prev) => {
           const rest = { ...prev }
-          delete rest[record.email.id]
+          delete rest[record.record_id]
           return rest
         })
         void refresh()
@@ -149,7 +161,7 @@ export default function App() {
 
   const beginProcessing = useCallback(
     async (source: ProcessingSource, days = 7) => {
-      const next = await startProcessing(source, days)
+      const next = await startProcessing(source, days, options)
       processInitialized.current = true
       handledProcessId.current = next.status === 'running' ? null : next.id
       processingRef.current = next
@@ -167,7 +179,7 @@ export default function App() {
         throw new Error(next.message)
       }
     },
-    [refresh, showToast],
+    [options, refresh, showToast],
   )
 
   const handleUploadMbox = useCallback(async () => {
@@ -195,7 +207,32 @@ export default function App() {
     [beginProcessing],
   )
 
+  const handleReset = useCallback(async () => {
+    setResetting(true)
+    try {
+      const resp = await resetQueue()
+      setResetOpen(false)
+      setRecords([])
+      setSelectedId(null)
+      setEdits({})
+      showToast(
+        `Queue reset — ${resp.processed_deleted} processed record(s) and ` +
+          `${resp.reviewed_deleted} review decision(s) deleted; approved ` +
+          'drafts and session logs are kept',
+      )
+      void refresh()
+    } catch (err) {
+      showToast(`error: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setResetting(false)
+    }
+  }, [refresh, showToast])
+
   const isProcessing = processing?.status === 'running'
+  const optionsCustomized =
+    options.limit !== null ||
+    options.anonymizer !== DEFAULT_PROCESSING_OPTIONS.anonymizer ||
+    options.task.trim() !== ''
 
   return (
     <div className="app">
@@ -227,12 +264,28 @@ export default function App() {
             ← Back to queue
           </md-filled-tonal-button>
         )}
+        <md-outlined-button
+          type="button"
+          className="topbar-action"
+          disabled={isProcessing}
+          onClick={() => setOptionsOpen(true)}
+        >
+          {optionsCustomized ? 'Options *' : 'Options'}
+        </md-outlined-button>
         <span className="spacer" />
         {view === 'queue' && (
           <>
             {records !== null && (
               <span className="dim pending-count">{list.length} pending</span>
             )}
+            <md-outlined-button
+              type="button"
+              className="topbar-action"
+              disabled={isProcessing || resetting}
+              onClick={() => setResetOpen(true)}
+            >
+              Reset queue
+            </md-outlined-button>
             <md-filled-tonal-button
               type="button"
               className="topbar-action flat-tonal-action"
@@ -283,7 +336,7 @@ export default function App() {
         <main className="main">
           <QueueList
             records={list}
-            selectedId={selected?.email.id ?? null}
+            selectedId={selected?.record_id ?? null}
             onSelect={setSelectedId}
           />
           {selected && (
@@ -291,10 +344,10 @@ export default function App() {
               record={selected}
               index={list.indexOf(selected) + 1}
               total={list.length}
-              draftText={edits[selected.email.id] ?? selected.draft ?? ''}
+              draftText={edits[selected.record_id] ?? selected.draft ?? ''}
               busy={busy}
               onDraftChange={(text) =>
-                setEdits((prev) => ({ ...prev, [selected.email.id]: text }))
+                setEdits((prev) => ({ ...prev, [selected.record_id]: text }))
               }
               onAction={(rec, action, draft) => void handleAction(rec, action, draft)}
             />
@@ -302,11 +355,158 @@ export default function App() {
         </main>
       )}
 
+      {optionsOpen && (
+        <OptionsDialog
+          options={options}
+          onSave={(next) => {
+            setOptions(next)
+            setOptionsOpen(false)
+            showToast('Processing options saved for this session')
+          }}
+          onClose={() => setOptionsOpen(false)}
+        />
+      )}
+
+      {resetOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal-card">
+            <h3 className="md-typescale-title-medium">Reset the review queue?</h3>
+            <p>
+              This deletes the processed and reviewed ledgers, so the next
+              processing run treats every email as new — including everything
+              already reviewed.
+            </p>
+            <p className="dim">
+              Approved drafts and session logs are not touched (same as the
+              terminal <code>reset</code> command).
+            </p>
+            <div className="modal-actions">
+              <md-outlined-button
+                type="button"
+                disabled={resetting}
+                onClick={() => setResetOpen(false)}
+              >
+                Cancel
+              </md-outlined-button>
+              <md-filled-button
+                type="button"
+                disabled={resetting}
+                onClick={() => void handleReset()}
+              >
+                {resetting ? 'Resetting…' : 'Reset queue'}
+              </md-filled-button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {toast && (
         <div className="toast" role="status">
           {toast}
         </div>
       )}
+    </div>
+  )
+}
+
+// Advanced processing options: the web mirror of the start/start-imap flags
+// (limit, anonymizer, task). Field edits are local until Save, so Cancel is
+// always a true no-op. The router config and eval flags stay terminal-only.
+const ANONYMIZERS: { id: Anonymizer; label: string; hint: string }[] = [
+  { id: 'regex', label: 'regex', hint: 'fixed-shape PII only (fastest)' },
+  { id: 'combined', label: 'combined', hint: 'regex + NER (default)' },
+  { id: 'coref', label: 'coref', hint: 'regex + NER + coreference (slowest)' },
+]
+
+function OptionsDialog({
+  options,
+  onSave,
+  onClose,
+}: {
+  options: ProcessingOptions
+  onSave: (next: ProcessingOptions) => void
+  onClose: () => void
+}) {
+  const [limitText, setLimitText] = useState(
+    options.limit === null ? '' : String(options.limit),
+  )
+  const [anonymizer, setAnonymizer] = useState<Anonymizer>(options.anonymizer)
+  const [task, setTask] = useState(options.task)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSave = () => {
+    const trimmed = limitText.trim()
+    let limit: number | null = null
+    if (trimmed !== '') {
+      const parsed = Number(trimmed)
+      if (
+        !Number.isInteger(parsed) ||
+        parsed < 1 ||
+        parsed > MAX_PROCESS_LIMIT
+      ) {
+        setError(`Processing limit must be a whole number from 1 to ${MAX_PROCESS_LIMIT}.`)
+        return
+      }
+      limit = parsed
+    }
+    onSave({ limit, anonymizer, task: task.trim() })
+  }
+
+  return (
+    <div className="modal-overlay" role="dialog" aria-modal="true">
+      <div className="modal-card">
+        <h3 className="md-typescale-title-medium">Advanced processing options</h3>
+        <p className="dim">
+          Applied to every processing run started from this page (mbox uploads
+          and IMAP). Leave everything as-is for the defaults.
+        </p>
+        <div className="modal-form">
+          <md-outlined-text-field
+            label="Processing limit"
+            type="number"
+            min="1"
+            max={String(MAX_PROCESS_LIMIT)}
+            value={limitText}
+            placeholder="all new mail"
+            supporting-text="process at most N new emails per run"
+            onInput={(e) => setLimitText((e.currentTarget as MdTextFieldElement).value)}
+          />
+          <md-outlined-select
+            label="Anonymizer"
+            value={anonymizer}
+            onInput={(e) =>
+              setAnonymizer((e.currentTarget as MdSelectElement).value as Anonymizer)
+            }
+          >
+            {ANONYMIZERS.map((a) => (
+              <md-select-option key={a.id} value={a.id} selected={a.id === anonymizer}>
+                <div slot="headline">{a.label}</div>
+                <div slot="supporting-text">{a.hint}</div>
+              </md-select-option>
+            ))}
+          </md-outlined-select>
+          <md-outlined-text-field
+            label="Task instruction"
+            value={task}
+            placeholder="default: draft a concise, professional reply"
+            supporting-text="one line, sent to Claude for escalated emails (placeholders only, never raw PII)"
+            onInput={(e) => setTask((e.currentTarget as MdTextFieldElement).value)}
+          />
+        </div>
+        {error && (
+          <div className="settings-status settings-status-error" role="alert">
+            {error}
+          </div>
+        )}
+        <div className="modal-actions">
+          <md-outlined-button type="button" onClick={onClose}>
+            Cancel
+          </md-outlined-button>
+          <md-filled-button type="button" onClick={handleSave}>
+            Save options
+          </md-filled-button>
+        </div>
+      </div>
     </div>
   )
 }

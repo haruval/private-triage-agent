@@ -695,6 +695,20 @@ def _select_emails(
     return list(islice(load_mbox(mbox_path), limit))
 
 
+def _imap_account_from_env() -> review_queue.ImapAccountRef | None:
+    """The currently configured IMAP account as routing metadata, if complete."""
+    host = os.environ.get("IMAP_HOST", "").strip()
+    user = os.environ.get("IMAP_USER", "").strip()
+    if not host or not user:
+        return None
+    drafts_folder = (
+        os.environ.get("IMAP_DRAFTS_FOLDER", "").strip() or DEFAULT_DRAFTS_FOLDER
+    )
+    return review_queue.ImapAccountRef(
+        host=host, user=user, drafts_folder=drafts_folder
+    )
+
+
 def _validate_source_args(args: argparse.Namespace) -> bool:
     """Check the mbox/imap source flags; print the problem and return False."""
     if args.source == "imap":
@@ -773,6 +787,9 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
     emails = _collect_process_emails(args)
     if emails is None:
         return 1
+    # Captured at fetch time so an IMAP approval routes to the account the
+    # mail actually came from, even if settings change mid-review.
+    imap_account = _imap_account_from_env() if args.source == "imap" else None
 
     processed = failed = escalated = approved = 0
     quit_early = False
@@ -841,7 +858,9 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
             if action == "edit":
                 draft_to_save = _edit_draft(draft_to_save)
             if action in ("approve", "edit") and draft_to_save.strip():
-                saved_path = _persist_approved(p, draft_to_save, out_dir, args.source)
+                saved_path = _persist_approved(
+                    p, draft_to_save, out_dir, args.source, imap_account
+                )
                 approved += 1
                 console.print(f"  [green]saved →[/] {saved_path}")
             elif action == "reject":
@@ -1013,6 +1032,9 @@ def _cmd_process(args: argparse.Namespace) -> int:
     emails = _collect_process_emails(args)
     if emails is None:
         return 1
+    # Captured at fetch time so an IMAP approval routes to the account the
+    # mail actually came from, even if settings change mid-review.
+    imap_account = _imap_account_from_env() if args.source == "imap" else None
 
     outcomes: queue.Queue[_ProcessOutcome | None] = queue.Queue()
     stop = threading.Event()
@@ -1083,7 +1105,9 @@ def _cmd_process(args: argparse.Namespace) -> int:
             if action == "edit":
                 draft_to_save = _edit_draft(draft_to_save)
             if action in ("approve", "edit") and draft_to_save.strip():
-                saved_path = _persist_approved(p, draft_to_save, out_dir, args.source)
+                saved_path = _persist_approved(
+                    p, draft_to_save, out_dir, args.source, imap_account
+                )
                 approved += 1
                 console.print(f"  [green]saved →[/] {saved_path}")
             elif action == "reject":
@@ -1336,7 +1360,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
         return 1
 
     queue_dir = Path(args.queue_dir)
-    already = review_queue.processed_ids(queue_dir)
+    already = review_queue.processed_record_ids(queue_dir)
 
     emails: list[Email] = []
     sources: dict[str, str] = {}
@@ -1344,7 +1368,8 @@ def _cmd_start(args: argparse.Namespace) -> int:
     with console.status("[cyan]Scanning mbox files…", spinner="dots"):
         for mbox_file in mbox_files:
             for email in load_mbox(mbox_file):
-                if email.id in already or email.id in sources:
+                record_id = review_queue.compute_record_id("mbox", None, email.id)
+                if record_id in already or email.id in sources:
                     skipped += 1
                     continue
                 sources[email.id] = f"mbox:{mbox_file.name}"
@@ -1364,11 +1389,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
 def _cmd_start_imap(args: argparse.Namespace) -> int:
     """Process unread IMAP mail into the queue (read-only connection)."""
     queue_dir = Path(args.queue_dir)
-    host = os.environ.get("IMAP_HOST", "").strip()
-    user = os.environ.get("IMAP_USER", "").strip()
-    drafts_folder = (
-        os.environ.get("IMAP_DRAFTS_FOLDER", "").strip() or DEFAULT_DRAFTS_FOLDER
-    )
+    account = _imap_account_from_env()
     try:
         with console.status(
             f"[cyan]Fetching unread (last {args.days} days) via IMAP…",
@@ -1379,20 +1400,17 @@ def _cmd_start_imap(args: argparse.Namespace) -> int:
         console.print(f"[red]IMAP error:[/] {exc}")
         return 1
 
-    already = review_queue.processed_ids(queue_dir)
-    emails = [e for e in fetched if e.id not in already]
+    # Dedupe on the account-scoped record id: the same Message-ID already
+    # processed from a *different* account (or an mbox export) is still new.
+    already = review_queue.processed_record_ids(queue_dir)
+    emails = [
+        e
+        for e in fetched
+        if review_queue.compute_record_id("imap", account, e.id) not in already
+    ]
     if args.limit is not None:
         emails = emails[: args.limit]
     sources = {e.id: "imap" for e in emails}
-    account = (
-        review_queue.ImapAccountRef(
-            host=host,
-            user=user,
-            drafts_folder=drafts_folder,
-        )
-        if host and user
-        else None
-    )
     imap_accounts = {e.id: account for e in emails} if account else None
     console.print(
         f"[dim]IMAP returned {len(fetched)} unread email(s); "
@@ -1402,13 +1420,26 @@ def _cmd_start_imap(args: argparse.Namespace) -> int:
 
 
 def run_queued_pipeline(
-    *, source: str, inbox_dir: Path, queue_dir: Path, days: int = 7
+    *,
+    source: str,
+    inbox_dir: Path,
+    queue_dir: Path,
+    days: int = 7,
+    limit: int | None = None,
+    anonymizer: str = "combined",
+    task: str | None = None,
 ) -> int:
-    """Run the queue-producing pipeline for the CLI or local web API."""
+    """Run the queue-producing pipeline for the CLI or local web API.
+
+    ``limit``, ``anonymizer``, and ``task`` mirror the ``start``/``start-imap``
+    flags; callers (the web API) validate them before they get here.
+    """
+    if anonymizer not in ("regex", "combined", "coref"):
+        raise ValueError(f"unknown anonymizer: {anonymizer!r}")
     args = argparse.Namespace(
-        limit=None,
-        anonymizer="combined",
-        task=DEFAULT_PROCESS_TASK,
+        limit=limit,
+        anonymizer=anonymizer,
+        task=task or DEFAULT_PROCESS_TASK,
         config=None,
         queue_dir=str(queue_dir),
         folder=str(inbox_dir),
@@ -1525,7 +1556,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
         elif action == "reject":
             console.print("  [dim]rejected — nothing saved[/]")
 
-        review_queue.append_reviewed(queue_dir, rec.email.id, action, saved_path)
+        review_queue.append_reviewed(
+            queue_dir, rec.record_id, rec.email.id, action, saved_path
+        )
         append_session_record(session_path, session_record(p, action, saved_path))
         reviewed += 1
         console.print()

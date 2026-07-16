@@ -70,6 +70,9 @@ MAX_DRAFT_CHARS = 100_000
 
 REVIEW_ACTIONS = frozenset({"approve", "edit", "reject"})
 PROCESS_SOURCES = frozenset({"mbox", "imap"})
+PROCESS_ANONYMIZERS = frozenset({"regex", "combined", "coref"})
+MAX_PROCESS_LIMIT = 10_000
+MAX_TASK_CHARS = 2_000
 
 IMAP_PROVIDER_TIMEOUT_SECS = 15
 
@@ -122,9 +125,14 @@ def _require_clean_str(
 
 @dataclass(frozen=True)
 class ReviewRequest:
-    """One decision from the web reviewer, same choices as `_prompt_action`."""
+    """One decision from the web reviewer, same choices as `_prompt_action`.
 
-    email_id: str
+    Keyed by the opaque ``record_id``, not the email's Message-ID — the same
+    Message-ID can legitimately be pending once per IMAP account, and a review
+    must land on exactly the record the user was looking at.
+    """
+
+    record_id: str
     action: str  # approve | edit | reject
     draft: str
 
@@ -132,9 +140,9 @@ class ReviewRequest:
     def from_json_dict(cls, d: Any) -> "ReviewRequest":
         if not isinstance(d, dict):
             raise ValueError(f"Expected a JSON object, got {type(d).__name__}")
-        email_id = d.get("email_id")
-        if not isinstance(email_id, str) or not email_id.strip():
-            raise ValueError("'email_id' must be a non-empty string")
+        record_id = d.get("record_id")
+        if not isinstance(record_id, str) or not record_id.strip():
+            raise ValueError("'record_id' must be a non-empty string")
         action = d.get("action")
         if action not in REVIEW_ACTIONS:
             raise ValueError(f"'action' must be one of {sorted(REVIEW_ACTIONS)}")
@@ -145,7 +153,7 @@ class ReviewRequest:
             raise ValueError("'draft' must be a string")
         if len(draft) > MAX_DRAFT_CHARS:
             raise ValueError(f"'draft' too long (max {MAX_DRAFT_CHARS} chars)")
-        return cls(email_id=email_id, action=action, draft=draft)
+        return cls(record_id=record_id, action=action, draft=draft)
 
 
 @dataclass(frozen=True)
@@ -204,10 +212,19 @@ class ImapSettings:
 
 @dataclass(frozen=True)
 class ProcessRequest:
-    """A request to run the same queue-producing pipeline as the CLI."""
+    """A request to run the same queue-producing pipeline as the CLI.
+
+    ``limit``, ``anonymizer``, and ``task`` mirror the ``start``/``start-imap``
+    flags. Everything is validated against fixed bounds and allowlists here —
+    the browser never gets to pass arbitrary configuration or filesystem
+    paths into the pipeline.
+    """
 
     source: str
     days: int
+    limit: int | None
+    anonymizer: str
+    task: str  # "" means "use the CLI default task"
 
     @classmethod
     def from_json_dict(cls, d: Any) -> "ProcessRequest":
@@ -219,7 +236,24 @@ class ProcessRequest:
         days = d.get("days", 7)
         if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 365:
             raise ValueError("'days' must be an integer from 1 to 365")
-        return cls(source=source, days=days)
+        limit = d.get("limit")
+        if limit is not None and (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_PROCESS_LIMIT
+        ):
+            raise ValueError(
+                f"'limit' must be an integer from 1 to {MAX_PROCESS_LIMIT}, or null"
+            )
+        anonymizer = d.get("anonymizer", "combined")
+        if anonymizer not in PROCESS_ANONYMIZERS:
+            raise ValueError(
+                f"'anonymizer' must be one of {sorted(PROCESS_ANONYMIZERS)}"
+            )
+        task = _require_clean_str(d, "task", max_len=MAX_TASK_CHARS, default="").strip()
+        return cls(
+            source=source, days=days, limit=limit, anonymizer=anonymizer, task=task
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +338,9 @@ class ProcessingJob:
     id: str
     source: str
     days: int
+    limit: int | None = None
+    anonymizer: str = "combined"
+    task: str = ""  # "" = the CLI default task instruction
     status: str = "running"
     started_at: str = field(
         default_factory=lambda: datetime.now().astimezone().isoformat()
@@ -317,6 +354,8 @@ class ProcessingJob:
             "id": self.id,
             "source": self.source,
             "days": self.days,
+            "limit": self.limit,
+            "anonymizer": self.anonymizer,
             "status": self.status,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -369,22 +408,25 @@ def create_server(config: ServerConfig | None = None) -> TriageAPIServer:
     return TriageAPIServer(config or ServerConfig())
 
 
-def _run_pipeline(config: ServerConfig, source: str, days: int) -> int:
+def _run_pipeline(config: ServerConfig, job: ProcessingJob) -> int:
     """Lazy CLI import keeps API startup light while sharing the real pipeline."""
     from src.cli import run_queued_pipeline
 
     return run_queued_pipeline(
-        source=source,
+        source=job.source,
         inbox_dir=config.inbox_dir,
         queue_dir=config.queue_dir,
-        days=days,
+        days=job.days,
+        limit=job.limit,
+        anonymizer=job.anonymizer,
+        task=job.task or None,
     )
 
 
 def _processing_worker(server: TriageAPIServer, job: ProcessingJob) -> None:
     """Run one pipeline job; detailed Rich progress remains visible in the terminal."""
     try:
-        exit_code = _run_pipeline(server.config, job.source, job.days)
+        exit_code = _run_pipeline(server.config, job)
     except Exception:
         logger.exception("%s pipeline job %s failed", job.source, job.id)
         exit_code = 1
@@ -502,6 +544,8 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
                 self._handle_review(body)
             elif self.path == "/api/process":
                 self._handle_process(body)
+            elif self.path == "/api/reset":
+                self._handle_reset()
             elif self.path == "/api/import-mbox":
                 self._handle_import_mbox()
             elif self.path == "/api/settings/imap":
@@ -543,9 +587,9 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
         config = self.server.config
         with self.server.write_lock:
             pending = review_queue.pending_records(config.queue_dir)
-            rec = next((r for r in pending if r.email.id == req.email_id), None)
+            rec = next((r for r in pending if r.record_id == req.record_id), None)
             if rec is None:
-                self._send_json(400, {"error": "unknown or already-reviewed email_id"})
+                self._send_json(400, {"error": "unknown or already-reviewed record_id"})
                 return
 
             p = processed_from_record(rec)
@@ -581,7 +625,7 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
                 warning = outcome.warning
 
             review_queue.append_reviewed(
-                config.queue_dir, rec.email.id, req.action, saved_path
+                config.queue_dir, rec.record_id, rec.email.id, req.action, saved_path
             )
             append_session_record(
                 self.server.session_path, session_record(p, req.action, saved_path)
@@ -610,6 +654,8 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
                     "id": None,
                     "source": None,
                     "days": None,
+                    "limit": None,
+                    "anonymizer": None,
                     "status": "idle",
                     "started_at": None,
                     "finished_at": None,
@@ -632,7 +678,12 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(409, {"error": "mail processing is already running"})
                 return
             job = ProcessingJob(
-                id=secrets.token_urlsafe(9), source=req.source, days=req.days
+                id=secrets.token_urlsafe(9),
+                source=req.source,
+                days=req.days,
+                limit=req.limit,
+                anonymizer=req.anonymizer,
+                task=req.task,
             )
             job.message = (
                 "Fetching and processing unread IMAP mail…"
@@ -649,6 +700,41 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
             worker.start()
 
         self._send_json(202, job.to_json_dict())
+
+    # --- POST /api/reset -------------------------------------------------------
+
+    def _handle_reset(self) -> None:
+        """Delete the two queue ledgers, mirroring the CLI `reset` command.
+
+        Approved drafts and session logs are never touched, and a reset is
+        refused while a processing job is running — the worker would append to
+        a ledger this just deleted, leaving a half-reset queue. The request
+        body is ignored; the confirmation happens in the UI.
+        """
+        config = self.server.config
+        with self.server.processing_lock:
+            current = self.server.processing_job
+            if current is not None and current.status == "running":
+                self._send_json(
+                    409, {"error": "cannot reset the queue while processing mail"}
+                )
+                return
+            with self.server.write_lock:
+                n_processed = len(review_queue.load_records(config.queue_dir))
+                n_reviewed = len(review_queue.reviewed_ids(config.queue_dir))
+                for path in (
+                    review_queue.processed_path(config.queue_dir),
+                    review_queue.reviewed_path(config.queue_dir),
+                ):
+                    path.unlink(missing_ok=True)
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "processed_deleted": n_processed,
+                "reviewed_deleted": n_reviewed,
+            },
+        )
 
     # --- POST /api/import-mbox ------------------------------------------------
 
@@ -919,8 +1005,12 @@ def _record_dto(rec: review_queue.QueueRecord) -> dict[str, Any]:
     PII, the exact secret this product exists to protect) and raw ``headers``.
     The UI needs neither: the stored draft is already rehydrated server-side,
     so the panel only shows how many placeholders were involved.
+
+    ``record_id`` is the review key: an opaque hash, so it exposes no account
+    metadata (the DTO must never carry ``imap_account`` host/user either).
     """
     return {
+        "record_id": rec.record_id,
         "email": {
             "id": rec.email.id,
             "from_addr": rec.email.from_addr,

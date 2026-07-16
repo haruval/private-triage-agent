@@ -29,6 +29,9 @@ export interface DecisionDTO {
 }
 
 export interface QueueRecordDTO {
+  // Opaque review key — the same Message-ID can be pending once per IMAP
+  // account, so selection and review must key on record_id, never email.id.
+  record_id: string
   email: EmailDTO
   result: ResultDTO
   decision: DecisionDTO
@@ -98,11 +101,21 @@ export function fetchQueue(): Promise<QueueRecordDTO[]> {
 }
 
 export function postReview(
-  emailId: string,
+  recordId: string,
   action: ReviewAction,
   draft: string,
 ): Promise<ReviewResponse> {
-  return post<ReviewResponse>('/api/review', { email_id: emailId, action, draft })
+  return post<ReviewResponse>('/api/review', { record_id: recordId, action, draft })
+}
+
+export interface ResetResponse {
+  ok: boolean
+  processed_deleted: number
+  reviewed_deleted: number
+}
+
+export function resetQueue(): Promise<ResetResponse> {
+  return post<ResetResponse>('/api/reset', {})
 }
 
 export interface ImportMboxResponse {
@@ -140,16 +153,33 @@ export function testImapSettings(form: ImapSettingsForm): Promise<ImapTestRespon
 
 export type ProcessingState = 'idle' | 'running' | 'succeeded' | 'failed'
 export type ProcessingSource = 'mbox' | 'imap'
+export type Anonymizer = 'regex' | 'combined' | 'coref'
 
 export interface ProcessingStatus {
   id: string | null
   source: ProcessingSource | null
   days: number | null
+  limit: number | null
+  anonymizer: Anonymizer | null
   status: ProcessingState
   started_at: string | null
   finished_at: string | null
   message: string
   exit_code: number | null
+}
+
+// Mirrors the start/start-imap CLI flags the API accepts; the server
+// validates every field against fixed bounds and allowlists.
+export interface ProcessingOptions {
+  limit: number | null
+  anonymizer: Anonymizer
+  task: string // '' = the pipeline's default task instruction
+}
+
+export const DEFAULT_PROCESSING_OPTIONS: ProcessingOptions = {
+  limit: null,
+  anonymizer: 'combined',
+  task: '',
 }
 
 export function fetchProcessingStatus(): Promise<ProcessingStatus> {
@@ -159,6 +189,13 @@ export function fetchProcessingStatus(): Promise<ProcessingStatus> {
 export function startProcessing(
   source: ProcessingSource,
   days = 7,
+  options: ProcessingOptions = DEFAULT_PROCESSING_OPTIONS,
 ): Promise<ProcessingStatus> {
-  return post<ProcessingStatus>('/api/process', { source, days })
+  return post<ProcessingStatus>('/api/process', {
+    source,
+    days,
+    limit: options.limit,
+    anonymizer: options.anonymizer,
+    task: options.task,
+  })
 }

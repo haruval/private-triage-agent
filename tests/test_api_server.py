@@ -32,11 +32,17 @@ from src.api.server import (
 )
 from src.ingestion.mbox_loader import Email
 from src.review_actions import save_approved_draft
-from src.review_queue import ImapAccountRef, QueueRecord
+from src.review_queue import ImapAccountRef, QueueRecord, compute_record_id
 from src.router.sensitivity_scorer import EscalationDecision
 from src.triage.classifier import TriageResult
 
 SECRET_PHONE = "555-0182-SECRET"  # mapping value that must never reach a response
+
+# Review requests are keyed by the opaque record_id; these mirror the fixture
+# records below (mbox scope for <a>/<b>, unscoped-imap scope for legacy <c>).
+RID_A = compute_record_id("mbox:test.mbox", None, "<a@host>")
+RID_B = compute_record_id("mbox:test.mbox", None, "<b@host>")
+RID_C = compute_record_id("imap", None, "<c@host>")
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +225,7 @@ def test_queue_lists_pending_most_important_first(api: Api) -> None:
     status, records, headers = api.get("/api/queue")
     assert status == 200
     assert [r["email"]["id"] for r in records] == ["<a@host>", "<b@host>", "<c@host>"]
+    assert [r["record_id"] for r in records] == [RID_A, RID_B, RID_C]
     assert headers["x-content-type-options"] == "nosniff"
     assert headers["cache-control"] == "no-store"
 
@@ -274,7 +281,7 @@ def test_approve_writes_ledger_session_and_drafts(api: Api, tmp_path: Path) -> N
     status, resp, _ = api.post(
         "/api/review",
         {
-            "email_id": "<a@host>",
+            "record_id": RID_A,
             "action": "approve",
             "draft": "Thanks Sarah — will do.",
         },
@@ -295,6 +302,7 @@ def test_approve_writes_ledger_session_and_drafts(api: Api, tmp_path: Path) -> N
 
     reviewed = _reviewed_lines(api.config)
     assert len(reviewed) == 1
+    assert reviewed[0]["record_id"] == RID_A
     assert reviewed[0]["email_id"] == "<a@host>"
     assert reviewed[0]["action"] == "approve"
     assert reviewed[0]["approved_path"] == str(txt_path)
@@ -330,7 +338,7 @@ def _processed_a() -> Any:
 def test_edit_persists_the_edited_draft(api: Api) -> None:
     status, resp, _ = api.post(
         "/api/review",
-        {"email_id": "<a@host>", "action": "edit", "draft": "Edited reply text."},
+        {"record_id": RID_A, "action": "edit", "draft": "Edited reply text."},
     )
     assert status == 200
     content = Path(resp["saved_path"]).read_text()
@@ -340,7 +348,7 @@ def test_edit_persists_the_edited_draft(api: Api) -> None:
 
 def test_reject_records_but_saves_nothing(api: Api) -> None:
     status, resp, _ = api.post(
-        "/api/review", {"email_id": "<b@host>", "action": "reject", "draft": ""}
+        "/api/review", {"record_id": RID_B, "action": "reject", "draft": ""}
     )
     assert status == 200
     assert resp["saved_path"] is None
@@ -353,24 +361,34 @@ def test_reject_records_but_saves_nothing(api: Api) -> None:
     assert _session_lines(api.config)[0]["action"] == "reject"
 
 
-def test_imap_source_approve_appends_to_drafts(
+def test_legacy_imap_record_without_account_cannot_be_approved(
     api: Api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """<c@host> predates account metadata: approving it must not append into
+    whatever IMAP account is configured now. Rejecting it still works."""
+    monkeypatch.setenv("IMAP_HOST", "imap.gmail.com")
+    monkeypatch.setenv("IMAP_USER", "current@gmail.com")
     calls: list[bytes] = []
     monkeypatch.setattr(
-        "src.review_actions.append_to_drafts", lambda raw: calls.append(raw)
+        "src.review_actions.append_to_drafts", lambda raw, **kw: calls.append(raw)
     )
     status, resp, _ = api.post(
         "/api/review",
-        {"email_id": "<c@host>", "action": "approve", "draft": "ok, sounds good"},
+        {"record_id": RID_C, "action": "approve", "draft": "ok, sounds good"},
+    )
+    assert status == 409
+    assert "reprocess" in resp["error"]
+    assert calls == []
+    assert _reviewed_lines(api.config) == []
+
+    status, resp, _ = api.post(
+        "/api/review", {"record_id": RID_C, "action": "reject", "draft": ""}
     )
     assert status == 200
-    assert resp["note"] == "saved to IMAP Drafts (not sent)"
-    assert len(calls) == 1
-    assert not list(api.config.approved_dir.glob("*.eml"))  # no .eml for imap
+    assert _reviewed_lines(api.config)[0]["record_id"] == RID_C
 
 
-def test_imap_approval_uses_stored_folder(
+def test_imap_approval_uses_stored_account_and_folder(
     api: Api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     account = ImapAccountRef(
@@ -384,18 +402,61 @@ def test_imap_approval_uses_stored_folder(
     )
     monkeypatch.setenv("IMAP_HOST", account.host)
     monkeypatch.setenv("IMAP_USER", account.user)
-    calls: list[str | None] = []
+    calls: list[tuple[bytes, str | None]] = []
 
     def _append(raw: bytes, *, folder: str | None = None) -> None:
-        calls.append(folder)
+        calls.append((raw, folder))
 
     monkeypatch.setattr("src.review_actions.append_to_drafts", _append)
-    status, _, _ = api.post(
+    status, resp, _ = api.post(
         "/api/review",
-        {"email_id": "<gmail@host>", "action": "approve", "draft": "reply"},
+        {
+            "record_id": compute_record_id("imap", account, "<gmail@host>"),
+            "action": "approve",
+            "draft": "reply",
+        },
     )
     assert status == 200
-    assert calls == ["[Gmail]/Drafts"]
+    assert resp["note"] == "saved to IMAP Drafts (not sent)"
+    assert len(calls) == 1
+    assert calls[0][1] == "[Gmail]/Drafts"
+    assert b"From: me@gmail.com" in calls[0][0]  # the stored account, not env
+    assert not list(api.config.approved_dir.glob("*.eml"))  # no .eml for imap
+
+
+def test_same_message_id_in_two_accounts_reviews_independently(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same Message-ID delivered to two IMAP accounts is two queue
+    records; reviewing one leaves the other pending and routable."""
+    account_one = ImapAccountRef(
+        host="imap.gmail.com", user="one@gmail.com", drafts_folder="[Gmail]/Drafts"
+    )
+    account_two = ImapAccountRef(
+        host="imap.gmail.com", user="two@gmail.com", drafts_folder="[Gmail]/Drafts"
+    )
+    review_queue.append_records(
+        api.config.queue_dir,
+        [
+            _record("<dup@host>", draft="r1", source="imap", imap_account=account_one),
+            _record("<dup@host>", draft="r2", source="imap", imap_account=account_two),
+        ],
+    )
+    rid_one = compute_record_id("imap", account_one, "<dup@host>")
+    rid_two = compute_record_id("imap", account_two, "<dup@host>")
+    assert rid_one != rid_two
+
+    _, records, _ = api.get("/api/queue")
+    ids = [r["record_id"] for r in records]
+    assert rid_one in ids and rid_two in ids
+
+    status, _, _ = api.post(
+        "/api/review", {"record_id": rid_one, "action": "reject", "draft": ""}
+    )
+    assert status == 200
+    _, records, _ = api.get("/api/queue")
+    ids = [r["record_id"] for r in records]
+    assert rid_one not in ids and rid_two in ids
 
 
 def test_imap_approval_blocks_the_wrong_active_account(
@@ -414,7 +475,11 @@ def test_imap_approval_blocks_the_wrong_active_account(
     monkeypatch.setenv("IMAP_USER", "other@gmail.com")
     status, resp, _ = api.post(
         "/api/review",
-        {"email_id": "<wrong@host>", "action": "approve", "draft": "reply"},
+        {
+            "record_id": compute_record_id("imap", account, "<wrong@host>"),
+            "action": "approve",
+            "draft": "reply",
+        },
     )
     assert status == 409
     assert "different IMAP account" in resp["error"]
@@ -425,22 +490,23 @@ def test_imap_approval_blocks_the_wrong_active_account(
 
 
 def test_two_reviews_share_one_session_file(api: Api) -> None:
-    api.post("/api/review", {"email_id": "<a@host>", "action": "reject", "draft": ""})
-    api.post("/api/review", {"email_id": "<b@host>", "action": "reject", "draft": ""})
+    api.post("/api/review", {"record_id": RID_A, "action": "reject", "draft": ""})
+    api.post("/api/review", {"record_id": RID_B, "action": "reject", "draft": ""})
     assert len(_session_lines(api.config)) == 2  # helper asserts a single file
 
 
 def test_review_validation_rejects_bad_input(api: Api) -> None:
     cases: list[Any] = [
-        {"email_id": "<nope@host>", "action": "approve", "draft": "x"},  # unknown id
-        {"email_id": "<a@host>", "action": "send", "draft": "x"},  # bad action
-        {"email_id": "<a@host>", "action": "approve", "draft": ""},  # empty draft
+        {"record_id": "not-a-known-id", "action": "approve", "draft": "x"},
+        {"email_id": "<a@host>", "action": "approve", "draft": "x"},  # legacy key
+        {"record_id": RID_A, "action": "send", "draft": "x"},  # bad action
+        {"record_id": RID_A, "action": "approve", "draft": ""},  # empty draft
         {
-            "email_id": "<b@host>",
+            "record_id": RID_B,
             "action": "approve",
             "draft": "typed",
         },  # record has no draft
-        {"email_id": "<a@host>", "action": "approve", "draft": "x" * 100_001},
+        {"record_id": RID_A, "action": "approve", "draft": "x" * 100_001},
         ["not", "a", "dict"],
     ]
     for body in cases:
@@ -470,7 +536,7 @@ def test_missing_or_wrong_token_is_403(api: Api) -> None:
     assert status == 403
     status, resp, _ = api.post(
         "/api/review",
-        {"email_id": "<a@host>", "action": "approve", "draft": "x"},
+        {"record_id": RID_A, "action": "approve", "draft": "x"},
         token=None,
     )
     assert status == 403
@@ -492,7 +558,7 @@ def test_dns_rebinding_host_is_403(api: Api) -> None:
 def test_cross_origin_post_is_403(api: Api) -> None:
     status, _, _ = api.post(
         "/api/review",
-        {"email_id": "<a@host>", "action": "approve", "draft": "x"},
+        {"record_id": RID_A, "action": "approve", "draft": "x"},
         origin="https://evil.example",
     )
     assert status == 403
@@ -518,7 +584,7 @@ def test_get_with_foreign_origin_is_still_served(api: Api) -> None:
 def test_post_content_type_and_size_limits(api: Api) -> None:
     status, _, _ = api.post(
         "/api/review",
-        {"email_id": "<a@host>", "action": "approve", "draft": "x"},
+        {"record_id": RID_A, "action": "approve", "draft": "x"},
         content_type="text/plain",
     )
     assert status == 415
@@ -584,10 +650,12 @@ def test_process_job_runs_shared_pipeline_and_rejects_overlap(
 ) -> None:
     started = threading.Event()
     release = threading.Event()
-    calls: list[tuple[ServerConfig, str, int]] = []
+    calls: list[tuple[ServerConfig, str, int, int | None, str, str]] = []
 
-    def _fake_run(config: ServerConfig, source: str, days: int) -> int:
-        calls.append((config, source, days))
+    def _fake_run(config: ServerConfig, job: Any) -> int:
+        calls.append(
+            (config, job.source, job.days, job.limit, job.anonymizer, job.task)
+        )
         started.set()
         assert release.wait(timeout=5)
         return 0
@@ -596,11 +664,23 @@ def test_process_job_runs_shared_pipeline_and_rejects_overlap(
     status, idle, _ = api.get("/api/process/status")
     assert status == 200 and idle["status"] == "idle"
 
-    status, job, _ = api.post("/api/process", {"source": "imap", "days": 14})
+    status, job, _ = api.post(
+        "/api/process",
+        {
+            "source": "imap",
+            "days": 14,
+            "limit": 25,
+            "anonymizer": "regex",
+            "task": "Summarize instead of replying.",
+        },
+    )
     assert status == 202
     assert started.wait(timeout=2)
     assert job["source"] == "imap"
-    assert _wait_for_job(api, "running")["days"] == 14
+    running = _wait_for_job(api, "running")
+    assert running["days"] == 14
+    assert running["limit"] == 25
+    assert running["anonymizer"] == "regex"
 
     status, resp, _ = api.post("/api/process", {"source": "mbox"})
     assert status == 409
@@ -622,13 +702,15 @@ def test_process_job_runs_shared_pipeline_and_rejects_overlap(
     release.set()
     completed = _wait_for_job(api, "succeeded")
     assert completed["exit_code"] == 0
-    assert calls == [(api.config, "imap", 14)]
+    assert calls == [
+        (api.config, "imap", 14, 25, "regex", "Summarize instead of replying.")
+    ]
 
 
 def test_process_job_reports_failure_without_leaking_exception(
     api: Api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def _fail(config: ServerConfig, source: str, days: int) -> int:
+    def _fail(config: ServerConfig, job: Any) -> int:
         raise RuntimeError("secret model detail")
 
     monkeypatch.setattr("src.api.server._run_pipeline", _fail)
@@ -646,10 +728,99 @@ def test_process_request_validation(api: Api) -> None:
         {"source": "imap", "days": 0},
         {"source": "imap", "days": True},
         {"source": "imap", "days": 366},
+        {"source": "imap", "limit": 0},
+        {"source": "imap", "limit": True},
+        {"source": "imap", "limit": 10_001},
+        {"source": "imap", "limit": "10"},
+        {"source": "imap", "anonymizer": "none"},  # only the fixed allowlist
+        {"source": "imap", "anonymizer": "../configs/evil.yaml"},
+        {"source": "imap", "task": "line one\nline two"},  # control characters
+        {"source": "imap", "task": "x" * 2_001},
+        {"source": "imap", "task": 42},
     ):
         status, resp, _ = api.post("/api/process", body)
         assert status == 400, body
         assert "error" in resp
+
+
+def test_process_defaults_match_the_cli(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[Any] = []
+
+    def _fake_run(config: ServerConfig, job: Any) -> int:
+        captured.append(job)
+        return 0
+
+    monkeypatch.setattr("src.api.server._run_pipeline", _fake_run)
+    status, _, _ = api.post("/api/process", {"source": "mbox"})
+    assert status == 202
+    _wait_for_job(api, "succeeded")
+    (job,) = captured
+    assert (job.limit, job.anonymizer, job.task) == (None, "combined", "")
+
+
+# ---------------------------------------------------------------------------
+# POST /api/reset — the web mirror of the CLI `reset` command
+# ---------------------------------------------------------------------------
+
+
+def test_reset_deletes_only_the_queue_ledgers(api: Api) -> None:
+    # An approved draft and a session log must survive a reset.
+    api.post(
+        "/api/review",
+        {"record_id": RID_A, "action": "approve", "draft": "Thanks Sarah — will do."},
+    )
+    assert list(api.config.approved_dir.glob("*.txt"))
+    assert _session_lines(api.config)
+
+    status, resp, _ = api.post("/api/reset", {})
+    assert status == 200
+    assert resp["ok"] is True
+    assert resp["processed_deleted"] == 3
+    assert resp["reviewed_deleted"] == 1
+    assert not review_queue.processed_path(api.config.queue_dir).exists()
+    assert not review_queue.reviewed_path(api.config.queue_dir).exists()
+    assert list(api.config.approved_dir.glob("*.txt"))  # drafts kept
+    assert _session_lines(api.config)  # session log kept
+
+    _, records, _ = api.get("/api/queue")
+    assert records == []
+
+    # Resetting an already-empty queue is a no-op, not an error.
+    status, resp, _ = api.post("/api/reset", {})
+    assert status == 200 and resp["processed_deleted"] == 0
+
+
+def test_reset_refused_while_processing(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = threading.Event()
+
+    def _fake_run(config: ServerConfig, job: Any) -> int:
+        assert release.wait(timeout=5)
+        return 0
+
+    monkeypatch.setattr("src.api.server._run_pipeline", _fake_run)
+    status, _, _ = api.post("/api/process", {"source": "mbox"})
+    assert status == 202
+    _wait_for_job(api, "running")
+
+    status, resp, _ = api.post("/api/reset", {})
+    assert status == 409
+    assert "while processing" in resp["error"]
+    assert review_queue.processed_path(api.config.queue_dir).exists()
+
+    release.set()
+    _wait_for_job(api, "succeeded")
+
+
+def test_reset_requires_the_gate(api: Api) -> None:
+    status, _, _ = api.post("/api/reset", {}, token=None)
+    assert status == 403
+    status, _, _ = api.post("/api/reset", {}, origin="https://evil.example")
+    assert status == 403
+    assert review_queue.processed_path(api.config.queue_dir).exists()
 
 
 # ---------------------------------------------------------------------------

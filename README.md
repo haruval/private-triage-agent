@@ -252,13 +252,22 @@ make web    # terminal 2 — the Vite dev server; open http://localhost:5173
 Start the API first: it writes the per-run session token to
 `frontend/.dev-token`, which the Vite proxy injects into every `/api`
 request. Top-left actions: **Upload .mbox** (opens a Finder file picker and
-copies the selected `.mbox` into `data/inbox`, then starts processing) and
+copies the selected `.mbox` into `data/inbox`, then starts processing),
 **Connect IMAP** (saves the `IMAP_*` values in `.env`, verifies the Inbox and
 Drafts folders read-only, and can fetch/process mail with one button; use an
-app-specific password, never your main account password). Processing runs in
+app-specific password, never your main account password), and **Options**
+(the `start`/`start-imap` flags: processing limit, anonymizer, task
+instruction — validated server-side against fixed allowlists). **Reset
+queue** (top-right, with a confirmation dialog) mirrors the terminal `reset`
+command: it clears the queue ledgers so the next run reprocesses everything,
+and never touches approved drafts or session logs. Processing runs in
 the API terminal, where detailed progress remains visible, while the browser
-shows job status and refreshes the queue when the run finishes. The terminal
-commands remain available but are not required for the web flow.
+shows job status and refreshes the queue when the run finishes.
+
+The web UI covers the complete main workflow (`start`, `start-imap`,
+`review`, `reset`). Diagnostic and development commands — `triage-emails`,
+`anonymize-emails`, `process`/`process-old`, the router `--config` override,
+and the eval scripts — are deliberately terminal-only.
 
 ![web review UI](docs/images/web-review.png)
 
