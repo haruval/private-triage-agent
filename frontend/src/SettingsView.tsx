@@ -5,7 +5,12 @@
 // typed; leaving it blank keeps the saved one.
 import { useEffect, useState } from 'react'
 
-import { fetchImapSettings, saveImapSettings, testImapSettings } from './api'
+import {
+  fetchImapSettings,
+  resetImapSettings,
+  saveImapSettings,
+  testImapSettings,
+} from './api'
 import type { MdSelectElement, MdTextFieldElement } from './declarations'
 
 const PROVIDERS = [
@@ -43,9 +48,17 @@ interface Props {
   showToast: (message: string) => void
   processing: boolean
   onStartImap: (days: number) => Promise<void>
+  onUsernameChange: (username: string) => void
+  embedded?: boolean
 }
 
-export default function SettingsView({ showToast, processing, onStartImap }: Props) {
+export default function SettingsView({
+  showToast,
+  processing,
+  onStartImap,
+  onUsernameChange,
+  embedded = false,
+}: Props) {
   const [loaded, setLoaded] = useState(false)
   const [provider, setProvider] = useState<ProviderId>('gmail')
   const [host, setHost] = useState('imap.gmail.com')
@@ -71,6 +84,7 @@ export default function SettingsView({ showToast, processing, onStartImap }: Pro
         setProvider(p)
         setHost(resolvedHost)
         setUser(s.user)
+        onUsernameChange(s.user)
         setFolder(s.folder || 'INBOX')
         setDraftsFolder(resolvedDrafts)
         setPasswordSaved(s.password)
@@ -87,7 +101,7 @@ export default function SettingsView({ showToast, processing, onStartImap }: Pro
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [onUsernameChange])
 
   const form = {
     host: host.trim(),
@@ -139,6 +153,29 @@ export default function SettingsView({ showToast, processing, onStartImap }: Pro
     }
   }
 
+  const handleReset = async () => {
+    setStatus({ kind: 'busy', message: 'resetting IMAP settings…' })
+    try {
+      await resetImapSettings()
+      setProvider('gmail')
+      setHost('imap.gmail.com')
+      setUser('')
+      setPassword('')
+      setFolder('INBOX')
+      setDraftsFolder('[Gmail]/Drafts')
+      setDays('7')
+      setPasswordSaved('unset')
+      onUsernameChange('')
+      setStatus({ kind: 'ok', message: 'IMAP settings reset in .env' })
+      showToast('IMAP settings reset to defaults')
+    } catch (err) {
+      setStatus({
+        kind: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
   const handleSaveAndProcess = async () => {
     const parsedDays = Number(days)
     if (!Number.isInteger(parsedDays) || parsedDays < 1 || parsedDays > 365) {
@@ -162,8 +199,15 @@ export default function SettingsView({ showToast, processing, onStartImap }: Pro
   }
 
   return (
-    <section className="settings-pane" aria-label="IMAP settings">
-      <h2 className="md-typescale-headline-small">Connect email over IMAP</h2>
+    <section
+      className={`settings-pane ${embedded ? 'settings-pane-embedded' : ''}`}
+      aria-label="IMAP settings"
+    >
+      {embedded ? (
+        <h4 className="md-typescale-title-medium">Connect IMAP</h4>
+      ) : (
+        <h2 className="md-typescale-headline-small">Connect email over IMAP</h2>
+      )}
       <p className="dim settings-intro">
         The connection is read-only: it never marks mail read, never deletes, and never
         sends. Approved replies are only ever saved as drafts.
@@ -198,7 +242,11 @@ export default function SettingsView({ showToast, processing, onStartImap }: Pro
           label="Username (email address)"
           value={user}
           disabled={!loaded || busy}
-          onInput={(e) => setUser((e.currentTarget as MdTextFieldElement).value)}
+          onInput={(e) => {
+            const next = (e.currentTarget as MdTextFieldElement).value
+            setUser(next)
+            onUsernameChange(next)
+          }}
         />
         <md-outlined-text-field
           label="App password"
@@ -241,6 +289,13 @@ export default function SettingsView({ showToast, processing, onStartImap }: Pro
         />
 
         <div className="settings-actions">
+          <md-outlined-button
+            type="button"
+            disabled={!loaded || busy}
+            onClick={handleReset}
+          >
+            Reset IMAP
+          </md-outlined-button>
           <md-outlined-button type="button" disabled={!loaded || busy} onClick={handleTest}>
             Test connection
           </md-outlined-button>

@@ -191,6 +191,17 @@ code {
   --md-filled-tonal-button-hover-container-elevation: 0;
 }
 
+/* A configured username makes Connect IMAP recede without disabling access. */
+.imap-configured {
+  opacity: 0.55;
+  filter: saturate(0.65);
+}
+
+.imap-configured:hover,
+.imap-configured:focus-visible {
+  opacity: 0.72;
+}
+
 .spacer {
   flex: 1;
 }
@@ -577,6 +588,18 @@ code {
   box-sizing: border-box;
 }
 
+.settings-pane-embedded {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+}
+
+/* Override the modal's generic paragraph reset and clear the select's label. */
+.options-card .settings-pane-embedded .settings-warning {
+  margin: 10px 0 28px;
+}
+
 .settings-intro {
   margin: 4px 0 0;
 }
@@ -644,7 +667,8 @@ code {
   font-family: var(--app-mono);
   font-size: 12.5px;
   box-shadow: 0 4px 16px rgb(0 0 0 / 0.35);
-  z-index: 10;
+  /* Global notifications must remain visible above modal overlays (z-index 20). */
+  z-index: 30;
   overflow-wrap: anywhere;
 }
 
@@ -690,7 +714,34 @@ code {
 }
 
 .options-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 18px 22px;
+}
+
+.options-close-button {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  margin: -6px -8px -6px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font: inherit;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.options-close-button:hover,
+.options-close-button:focus-visible {
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
 }
 
 .options-layout {

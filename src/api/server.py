@@ -550,6 +550,8 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
                 self._handle_import_mbox()
             elif self.path == "/api/settings/imap":
                 self._handle_settings_post(body)
+            elif self.path == "/api/settings/imap/reset":
+                self._handle_settings_reset()
             elif self.path == "/api/settings/imap/test":
                 self._handle_settings_test(body)
             else:
@@ -879,6 +881,28 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
                 "password": "set" if os.environ.get("IMAP_PASS") else "unset",
             },
         )
+
+    def _handle_settings_reset(self) -> None:
+        """Restore IMAP defaults and clear credentials, preserving other env keys."""
+        updates = {
+            "IMAP_HOST": "imap.gmail.com",
+            "IMAP_USER": "",
+            "IMAP_PASS": "",
+            "IMAP_FOLDER": "INBOX",
+            "IMAP_DRAFTS_FOLDER": "[Gmail]/Drafts",
+        }
+        with self.server.processing_lock:
+            current = self.server.processing_job
+            if current is not None and current.status == "running":
+                self._send_json(
+                    409, {"error": "cannot change IMAP settings while processing mail"}
+                )
+                return
+            with self.server.write_lock:
+                write_env_keys(self.server.config.env_path, updates)
+                os.environ.update(updates)
+
+        self._send_json(200, {"ok": True, "password": "unset"})
 
     # --- POST /api/settings/imap/test --------------------------------------------
 

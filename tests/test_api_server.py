@@ -923,6 +923,70 @@ def test_settings_post_round_trips_env_file(
     assert "IMAP_PASS=abcd efgh ijkl mnop" in env_path.read_text()
 
 
+def test_settings_reset_clears_imap_env_and_preserves_unrelated_values(
+    api: Api, clean_imap_env: pytest.MonkeyPatch
+) -> None:
+    env_path = api.config.env_path
+    env_path.write_text(
+        "ANTHROPIC_API_KEY=sk-test-123\n"
+        "IMAP_HOST=imap.example.com\n"
+        "IMAP_USER=me@example.com\n"
+        "IMAP_PASS=app-password\n"
+        "IMAP_FOLDER=Receipts\n"
+        "IMAP_DRAFTS_FOLDER=Saved Drafts\n"
+    )
+    env_path.chmod(0o644)
+    for key, value in {
+        "IMAP_HOST": "imap.example.com",
+        "IMAP_USER": "me@example.com",
+        "IMAP_PASS": "app-password",
+        "IMAP_FOLDER": "Receipts",
+        "IMAP_DRAFTS_FOLDER": "Saved Drafts",
+    }.items():
+        clean_imap_env.setenv(key, value)
+
+    status, resp, _ = api.post("/api/settings/imap/reset", {})
+
+    assert status == 200
+    assert resp == {"ok": True, "password": "unset"}
+    lines = env_path.read_text().splitlines()
+    assert "ANTHROPIC_API_KEY=sk-test-123" in lines
+    expected = {
+        "IMAP_HOST": "imap.gmail.com",
+        "IMAP_USER": "",
+        "IMAP_PASS": "",
+        "IMAP_FOLDER": "INBOX",
+        "IMAP_DRAFTS_FOLDER": "[Gmail]/Drafts",
+    }
+    for key, value in expected.items():
+        assert f"{key}={value}" in lines
+        assert os.environ[key] == value
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+    status, settings, _ = api.get("/api/settings/imap")
+    assert status == 200
+    assert settings == {
+        "host": "imap.gmail.com",
+        "user": "",
+        "folder": "INBOX",
+        "drafts_folder": "[Gmail]/Drafts",
+        "password": "unset",
+    }
+
+
+def test_settings_reset_requires_the_gate(api: Api) -> None:
+    env_path = api.config.env_path
+    env_path.write_text("IMAP_USER=keep@example.com\n")
+
+    status, _, _ = api.post("/api/settings/imap/reset", {}, token=None)
+    assert status == 403
+    status, _, _ = api.post(
+        "/api/settings/imap/reset", {}, origin="https://evil.example"
+    )
+    assert status == 403
+    assert env_path.read_text() == "IMAP_USER=keep@example.com\n"
+
+
 def test_settings_post_rejects_env_injection(
     api: Api, clean_imap_env: pytest.MonkeyPatch
 ) -> None:
