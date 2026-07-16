@@ -12,9 +12,10 @@ leaves the box or enters version control.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,75 @@ PROCESSED_FILENAME = "processed.jsonl"
 REVIEWED_FILENAME = "reviewed.jsonl"
 
 
+def source_is_imap(source: str) -> bool:
+    """True when an email's source string names an IMAP connection.
+
+    IMAP sources are ``"imap"`` (both ``start-imap`` and ``process --source
+    imap``); mbox sources are ``"mbox:<file>"`` (``start``) or ``"mbox"``
+    (``process``). An empty/unknown source is treated as mbox.
+    """
+    return source.strip().lower().startswith("imap")
+
+
+def compute_record_id(
+    source: str, imap_account: "ImapAccountRef | None", email_id: str
+) -> str:
+    """Opaque queue identity: the Message-ID scoped by where it came from.
+
+    A raw Message-ID is not a safe ledger key — the same message delivered to
+    two IMAP accounts carries the same Message-ID, and keying on it alone lets
+    one account's processing (or review) suppress the other's. The scope is:
+
+    - mbox sources share one ``mbox`` scope, preserving cross-file dedupe
+      (the same export dropped in twice is still one email);
+    - account-scoped IMAP records hash in the normalized host and username,
+      so identical Message-IDs in different accounts stay distinct;
+    - IMAP records without stored account metadata (legacy ledger lines) get
+      a bare ``imap`` scope — deliberately different from every account
+      scope, so an old review can never suppress a newly ingested
+      account-scoped record.
+
+    The hash keeps the id opaque: it can appear in API responses and UI keys
+    without carrying the account username along.
+    """
+    if source_is_imap(source):
+        if imap_account is not None:
+            scope = (
+                "imap",
+                imap_account.host.strip().lower(),
+                imap_account.user.strip().lower(),
+            )
+        else:
+            scope = ("imap",)
+    else:
+        scope = ("mbox",)
+    payload = "\x1f".join((*scope, email_id))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+@dataclass(frozen=True)
+class ImapAccountRef:
+    """Non-secret IMAP routing metadata captured when an email is ingested."""
+
+    host: str
+    user: str
+    drafts_folder: str
+
+    @classmethod
+    def from_json_dict(cls, d: Any) -> "ImapAccountRef":
+        if not isinstance(d, dict):
+            raise ValueError("'imap_account' must be a dict or null")
+        values: dict[str, str] = {}
+        for key in ("host", "user", "drafts_folder"):
+            value = d.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"'imap_account.{key}' must be a non-empty string")
+            if len(value) > 320 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+                raise ValueError(f"'imap_account.{key}' is invalid")
+            values[key] = value.strip()
+        return cls(**values)
+
+
 @dataclass
 class QueueRecord:
     """One fully processed email waiting for (or done with) human review."""
@@ -39,15 +109,25 @@ class QueueRecord:
     result: TriageResult
     decision: EscalationDecision
     draft: str | None
-    provenance: str            # "local" or "Claude"
-    mapping: dict[str, str]    # placeholder -> original (empty unless escalated)
+    provenance: str  # "local" or "Claude"
+    mapping: dict[str, str]  # placeholder -> original (empty unless escalated)
     claude_used: bool
     error: str | None
-    importance: float          # 1 (ignore) .. 10 (urgent)
+    importance: float  # 1 (ignore) .. 10 (urgent)
     importance_reason: str
-    ranked_by: str             # "Claude" or a fallback description
-    source: str                # e.g. "mbox:enron_50.mbox" or "imap"
-    processed_at: str          # ISO timestamp
+    ranked_by: str  # "Claude" or a fallback description
+    source: str  # e.g. "mbox:enron_50.mbox" or "imap"
+    processed_at: str  # ISO timestamp
+    imap_account: ImapAccountRef | None = None
+    # Opaque, source-scoped ledger identity; derived when absent so records
+    # written before the field existed keep loading (see compute_record_id).
+    record_id: str = field(default="")
+
+    def __post_init__(self) -> None:
+        if not self.record_id:
+            self.record_id = compute_record_id(
+                self.source, self.imap_account, self.email.id
+            )
 
     def to_json_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -83,6 +163,13 @@ class QueueRecord:
         if isinstance(importance, bool) or not isinstance(importance, (int, float)):
             raise ValueError("'importance' must be a number")
 
+        raw_imap_account = d.get("imap_account")
+        imap_account = (
+            ImapAccountRef.from_json_dict(raw_imap_account)
+            if raw_imap_account is not None
+            else None
+        )
+
         return cls(
             email=email,
             result=result,
@@ -97,6 +184,8 @@ class QueueRecord:
             ranked_by=str(d.get("ranked_by", "")),
             source=str(d.get("source", "")),
             processed_at=str(d.get("processed_at", "")),
+            imap_account=imap_account,
+            record_id=str(d.get("record_id") or ""),
         )
 
 
@@ -161,17 +250,22 @@ def load_records(queue_dir: Path) -> list[QueueRecord]:
     return records
 
 
-def processed_ids(queue_dir: Path) -> set[str]:
-    return {record.email.id for record in load_records(queue_dir)}
+def processed_record_ids(queue_dir: Path) -> set[str]:
+    return {record.record_id for record in load_records(queue_dir)}
 
 
 def append_reviewed(
-    queue_dir: Path, email_id: str, action: str, approved_path: Path | None
+    queue_dir: Path,
+    record_id: str,
+    email_id: str,
+    action: str,
+    approved_path: Path | None,
 ) -> None:
     path = reviewed_path(queue_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "timestamp": datetime.now().astimezone().isoformat(),
+        "record_id": record_id,
         "email_id": email_id,
         "action": action,
         "approved_path": str(approved_path) if approved_path else None,
@@ -180,7 +274,50 @@ def append_reviewed(
         f.write(json.dumps(record) + "\n")
 
 
+@dataclass(frozen=True)
+class ReviewedKeys:
+    """The reviewed ledger split by entry vintage.
+
+    Entries written since record ids existed carry ``record_id``; older ones
+    carry only the raw ``email_id``. Legacy keys must only ever suppress
+    records that are themselves unscoped (mbox or legacy IMAP) — matching a
+    raw Message-ID against an account-scoped record would let a review from
+    one account swallow the same message in another.
+    """
+
+    record_ids: set[str]
+    legacy_email_ids: set[str]
+
+
+def reviewed_keys(queue_dir: Path) -> ReviewedKeys:
+    path = reviewed_path(queue_dir)
+    record_ids: set[str] = set()
+    legacy_email_ids: set[str] = set()
+    if not path.exists():
+        return ReviewedKeys(record_ids, legacy_email_ids)
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                record_id = entry.get("record_id")
+                if isinstance(record_id, str) and record_id:
+                    record_ids.add(record_id)
+                else:
+                    legacy_email_ids.add(str(entry["email_id"]))
+            except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+                # AttributeError covers valid-JSON-but-not-an-object lines
+                # (`null`, a string, a list) — same warn-and-skip contract as
+                # every other ledger reader; one bad line must never take the
+                # review surface down.
+                logger.warning("%s: skipping bad reviewed entry", path)
+    return ReviewedKeys(record_ids, legacy_email_ids)
+
+
 def reviewed_ids(queue_dir: Path) -> set[str]:
+    """Every reviewed email id, old and new entries alike (used for counts)."""
     path = reviewed_path(queue_dir)
     if not path.exists():
         return set()
@@ -200,16 +337,20 @@ def reviewed_ids(queue_dir: Path) -> set[str]:
 def pending_records(queue_dir: Path) -> list[QueueRecord]:
     """Unreviewed records, most important first (ties: oldest processed first).
 
-    Deduped by email id keeping the first occurrence — a reprocessed email
-    shouldn't show up for review twice.
+    Deduped by record id keeping the first occurrence — a reprocessed email
+    shouldn't show up for review twice, but the same Message-ID ingested from
+    two different IMAP accounts is two distinct records.
     """
-    done = reviewed_ids(queue_dir)
+    done = reviewed_keys(queue_dir)
     seen: set[str] = set()
     pending: list[QueueRecord] = []
     for record in load_records(queue_dir):
-        if record.email.id in done or record.email.id in seen:
+        if record.record_id in done.record_ids or record.record_id in seen:
             continue
-        seen.add(record.email.id)
+        # Pre-record_id reviewed entries only suppress unscoped records.
+        if record.imap_account is None and record.email.id in done.legacy_email_ids:
+            continue
+        seen.add(record.record_id)
         pending.append(record)
     pending.sort(key=lambda r: (-r.importance, r.processed_at))
     return pending

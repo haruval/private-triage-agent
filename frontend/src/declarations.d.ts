@@ -35,7 +35,10 @@ declare module 'react' {
       'md-divider': MdProps
       'md-list': MdProps
       'md-list-item': MdProps<HTMLElement, { type?: 'text' | 'button' | 'link' }>
-      'md-linear-progress': MdProps<HTMLElement, { value?: number; max?: number }>
+      'md-linear-progress': MdProps<
+        HTMLElement,
+        { value?: number; max?: number; indeterminate?: boolean }
+      >
       'md-outlined-select': MdProps<
         MdSelectElement,
         { label?: string; value?: string; disabled?: boolean }
@@ -47,6 +50,8 @@ declare module 'react' {
           label?: string
           value?: string
           type?: string
+          min?: string
+          max?: string
           rows?: number
           placeholder?: string
           disabled?: boolean

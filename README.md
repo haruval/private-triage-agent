@@ -236,11 +236,12 @@ python -m src.cli reset -y    # skip the prompt
 ```
 
 
-## Web UI (browser review queue)
+## Web UI (full browser pipeline and review queue)
 
-A local web version of `review`: the same pending queue, most important
-first, with the same approve / edit / reject semantics writing the same
-ledgers, session logs, and approved drafts. One-time setup:
+A local web version of the full `start` / `start-imap` → `review` flow: the
+same pipeline fills the same pending queue, most important first, and approve /
+edit / reject writes the same ledgers, session logs, and approved drafts.
+One-time setup:
 `cd frontend && npm install` (needs Node 20+).
 
 ```sh
@@ -250,10 +251,24 @@ make web    # terminal 2 — the Vite dev server; open http://localhost:5173
 
 Start the API first: it writes the per-run session token to
 `frontend/.dev-token`, which the Vite proxy injects into every `/api`
-request. Top-left actions: **Upload mbox** (opens Finder at `data/inbox` —
-drop `.mbox` files there, then run `python -m src.cli start`) and
-**Connect IMAP** (edits the `IMAP_*` values in `.env`; use an app-specific
-password, never your main account password).
+request. Top-left actions: **Upload .mbox** (opens a Finder file picker and
+copies the selected `.mbox` into `data/inbox`, then starts processing),
+**Connect IMAP** (saves the `IMAP_*` values in `.env`, verifies the Inbox and
+Drafts folders read-only, and can fetch/process mail with one button; use an
+app-specific password, never your main account password), and **Options**.
+The Options popup groups the `start`/`start-imap` flags (processing limit,
+anonymizer, task instruction — validated server-side against fixed allowlists)
+under **Advanced**, with **Reset queue** in a separate **Reset** sidebar
+section. Reset mirrors the terminal command: it clears the queue ledgers so the
+next run reprocesses everything and never touches approved drafts or session
+logs. Processing runs in
+the API terminal, where detailed progress remains visible, while the browser
+shows job status and refreshes the queue when the run finishes.
+
+The web UI covers the complete main workflow (`start`, `start-imap`,
+`review`, `reset`). Diagnostic and development commands — `triage-emails`,
+`anonymize-emails`, `process`/`process-old`, the router `--config` override,
+and the eval scripts — are deliberately terminal-only.
 
 ![web review UI](docs/images/web-review.png)
 
@@ -304,6 +319,7 @@ IMAP_HOST=imap.gmail.com
 IMAP_USER=you@example.com
 IMAP_PASS=<imap app password *see below*>
 IMAP_FOLDER=INBOX          # optional
+IMAP_DRAFTS_FOLDER=[Gmail]/Drafts  # Gmail; provider is prefilled in the web UI
 ```
 
 **USE A PASSWORD JUST FOR THIS, NOT YOUR REAL ACCOUNT PASSWORD. I WOULD NOT TRUST ME THAT MUCH.** For Gmail
@@ -333,10 +349,14 @@ python -m src.cli start data/inbox && python -m src.cli review   # approvals -> 
 python -m src.cli start-imap --days 7 && python -m src.cli review # approvals -> IMAP Drafts
 ```
 
-The IMAP APPEND writes to the `Drafts` folder by default; for Gmail set
-`IMAP_DRAFTS_FOLDER=[Gmail]/Drafts`. This is the only write the IMAP layer
-ever makes, and it is APPEND-only, it just adds to your drafts
-folder. The final Send is always done yourself.
+The IMAP APPEND writes to the configured `IMAP_DRAFTS_FOLDER`. The web UI
+prefills `[Gmail]/Drafts` for Gmail, `Draft` for Yahoo, and `Drafts` for the
+other built-in providers, while keeping the value editable. Each queued IMAP
+email records its non-secret account and Drafts-folder routing metadata; if
+you switch accounts, approval asks you to reconnect the account that supplied
+that email instead of putting its draft in the wrong mailbox. This is the only
+write the IMAP layer ever makes, and it is APPEND-only. The final Send is
+always done yourself.
 
 ## Development testing stuff
 

@@ -24,6 +24,7 @@ from typing import Any
 from src import review_queue
 from src.ingestion.imap_loader import append_to_drafts
 from src.ingestion.mbox_loader import Email
+from src.review_queue import source_is_imap
 from src.router.sensitivity_scorer import EscalationDecision
 from src.triage.classifier import TriageResult
 
@@ -38,10 +39,10 @@ class ProcessedEmail:
     result: TriageResult
     decision: EscalationDecision
     draft: str | None
-    provenance: str            # "local" or "Claude"
-    mapping: dict[str, str]    # placeholder -> original (empty unless escalated)
+    provenance: str  # "local" or "Claude"
+    mapping: dict[str, str]  # placeholder -> original (empty unless escalated)
     claude_used: bool
-    error: str | None          # escalation-path error note, if any
+    error: str | None  # escalation-path error note, if any
 
 
 @dataclass
@@ -56,6 +57,10 @@ class PersistOutcome:
     txt_path: Path
     note: str | None
     warning: str | None
+
+
+class ImapAccountMismatchError(RuntimeError):
+    """The queued email belongs to a different IMAP account than the active one."""
 
 
 def processed_from_record(rec: review_queue.QueueRecord) -> ProcessedEmail:
@@ -106,22 +111,27 @@ def reply_subject(subject: str) -> str:
     return subject if subject[:3].lower() == "re:" else f"Re: {subject}"
 
 
-def build_reply_message(p: ProcessedEmail, draft: str) -> EmailMessage:
+def build_reply_message(
+    p: ProcessedEmail, draft: str, *, sender: str | None = None
+) -> EmailMessage:
     """Build the approved reply as an RFC-5322 message: headers, threading, body.
 
     Shared by the ``.eml`` export and the IMAP Drafts APPEND. ``To`` is the
-    original sender; ``From`` is filled from IMAP_USER when set, otherwise the
-    mail client supplies it on open. Threading headers are added only when the
-    original carried a real Message-ID (not a synthesized content hash), so
-    replies thread correctly in the recipient's client.
+    original sender; ``From`` is set only when the caller passes the account
+    the email actually belongs to (the IMAP path passes the stored account
+    username). mbox ``.eml`` files deliberately omit ``From`` so the mail
+    client picks the sending account on open — reading a global IMAP_USER
+    here used to stamp an unrelated connected account onto mbox replies.
+    Threading headers are added only when the original carried a real
+    Message-ID (not a synthesized content hash), so replies thread correctly
+    in the recipient's client.
     """
     msg = EmailMessage()
     orig = p.email
     if orig.from_addr:
         msg["To"] = orig.from_addr
-    sender = os.environ.get("IMAP_USER", "").strip()
-    if sender:
-        msg["From"] = sender
+    if sender and sender.strip():
+        msg["From"] = sender.strip()
     msg["Subject"] = reply_subject(orig.subject)
     if orig.id and not orig.id.startswith("<sha1:"):
         msg["In-Reply-To"] = orig.id
@@ -146,18 +156,12 @@ def save_approved_eml(p: ProcessedEmail, draft: str, out_dir: Path) -> Path:
     return path
 
 
-def source_is_imap(source: str) -> bool:
-    """True when an email's source string names an IMAP connection.
-
-    IMAP sources are ``"imap"`` (both ``start-imap`` and ``process --source
-    imap``); mbox sources are ``"mbox:<file>"`` (``start``) or ``"mbox"``
-    (``process``). An empty/unknown source is treated as mbox.
-    """
-    return source.strip().lower().startswith("imap")
-
-
 def persist_approved(
-    p: ProcessedEmail, draft: str, out_dir: Path, source: str
+    p: ProcessedEmail,
+    draft: str,
+    out_dir: Path,
+    source: str,
+    imap_account: review_queue.ImapAccountRef | None = None,
 ) -> PersistOutcome:
     """Persist an approved draft, routing by where the email came from.
 
@@ -172,13 +176,37 @@ def persist_approved(
 
     The routed step is best-effort: a failure is reported in the outcome but
     never blocks the review, and nothing here ever sends the mail.
+
+    An IMAP-sourced record **must** carry its stored account metadata: without
+    it there is no way to know which account's Drafts folder the reply belongs
+    in, and appending to whatever account happens to be configured now could
+    file a draft into the wrong mailbox. Records queued before the account
+    metadata existed are refused — reject them and reprocess the mailbox after
+    reconnecting the right account.
     """
+    if source_is_imap(source):
+        if imap_account is None:
+            raise ImapAccountMismatchError(
+                "this email was queued without account routing metadata "
+                "(processed by an older version); reject it, reconnect the "
+                "account it came from, and reprocess it with start-imap"
+            )
+        current_host = os.environ.get("IMAP_HOST", "").strip()
+        current_user = os.environ.get("IMAP_USER", "").strip()
+        if (current_host, current_user) != (imap_account.host, imap_account.user):
+            raise ImapAccountMismatchError(
+                "this email was fetched from a different IMAP account; "
+                "reconnect that account before approving its draft"
+            )
+
     txt_path = save_approved_draft(p, draft, out_dir)
     note: str | None = None
     warning: str | None = None
     if source_is_imap(source):
+        assert imap_account is not None  # guaranteed by the guard above
         try:
-            append_to_drafts(build_reply_message(p, draft).as_bytes())
+            raw = build_reply_message(p, draft, sender=imap_account.user).as_bytes()
+            append_to_drafts(raw, folder=imap_account.drafts_folder)
             note = "saved to IMAP Drafts (not sent)"
         except Exception as exc:
             warning = f"could not save to IMAP Drafts: {exc}"

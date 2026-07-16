@@ -34,8 +34,10 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -45,7 +47,9 @@ from typing import Any
 
 from src import review_queue
 from src.config import REPO_ROOT, load_env_file
+from src.ingestion.imap_loader import DEFAULT_DRAFTS_FOLDER
 from src.review_actions import (
+    ImapAccountMismatchError,
     append_session_record,
     persist_approved,
     processed_from_record,
@@ -61,18 +65,41 @@ TOKEN_FILENAME = ".dev-token"
 # Only the Vite dev server may originate mutating requests.
 ALLOWED_ORIGINS = frozenset({"http://localhost:5173", "http://127.0.0.1:5173"})
 
-MAX_BODY_BYTES = 1024 * 1024        # 1 MiB request-body cap
+MAX_BODY_BYTES = 1024 * 1024  # 1 MiB request-body cap
 MAX_DRAFT_CHARS = 100_000
 
 REVIEW_ACTIONS = frozenset({"approve", "edit", "reject"})
+PROCESS_SOURCES = frozenset({"mbox", "imap"})
+PROCESS_ANONYMIZERS = frozenset({"regex", "combined", "coref"})
+MAX_PROCESS_LIMIT = 10_000
+MAX_TASK_CHARS = 2_000
 
 IMAP_PROVIDER_TIMEOUT_SECS = 15
+
+_PICK_MBOX_SCRIPT = """\
+try
+  set selectedFile to choose file with prompt "Choose an .mbox file"
+  return POSIX path of selectedFile
+on error number -128
+  return ""
+end try
+"""
 
 _HOSTNAME_RE = re.compile(
     r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
 )
 _FOLDER_RE = re.compile(r"^[A-Za-z0-9\[\]/&_. -]+$")
+
+
+def default_drafts_folder(host: str) -> str:
+    """Return the provider convention used when no explicit folder is saved."""
+    normalized = host.strip().lower()
+    if normalized == "imap.gmail.com":
+        return "[Gmail]/Drafts"
+    if normalized == "imap.mail.yahoo.com":
+        return "Draft"
+    return DEFAULT_DRAFTS_FOLDER
 
 
 # ---------------------------------------------------------------------------
@@ -98,9 +125,14 @@ def _require_clean_str(
 
 @dataclass(frozen=True)
 class ReviewRequest:
-    """One decision from the web reviewer, same choices as `_prompt_action`."""
+    """One decision from the web reviewer, same choices as `_prompt_action`.
 
-    email_id: str
+    Keyed by the opaque ``record_id``, not the email's Message-ID — the same
+    Message-ID can legitimately be pending once per IMAP account, and a review
+    must land on exactly the record the user was looking at.
+    """
+
+    record_id: str
     action: str  # approve | edit | reject
     draft: str
 
@@ -108,9 +140,9 @@ class ReviewRequest:
     def from_json_dict(cls, d: Any) -> "ReviewRequest":
         if not isinstance(d, dict):
             raise ValueError(f"Expected a JSON object, got {type(d).__name__}")
-        email_id = d.get("email_id")
-        if not isinstance(email_id, str) or not email_id.strip():
-            raise ValueError("'email_id' must be a non-empty string")
+        record_id = d.get("record_id")
+        if not isinstance(record_id, str) or not record_id.strip():
+            raise ValueError("'record_id' must be a non-empty string")
         action = d.get("action")
         if action not in REVIEW_ACTIONS:
             raise ValueError(f"'action' must be one of {sorted(REVIEW_ACTIONS)}")
@@ -121,7 +153,7 @@ class ReviewRequest:
             raise ValueError("'draft' must be a string")
         if len(draft) > MAX_DRAFT_CHARS:
             raise ValueError(f"'draft' too long (max {MAX_DRAFT_CHARS} chars)")
-        return cls(email_id=email_id, action=action, draft=draft)
+        return cls(record_id=record_id, action=action, draft=draft)
 
 
 @dataclass(frozen=True)
@@ -139,9 +171,12 @@ class ImapSettings:
     user: str
     password: str
     folder: str
+    drafts_folder: str
 
     @classmethod
-    def from_json_dict(cls, d: Any, *, require_host_user: bool = True) -> "ImapSettings":
+    def from_json_dict(
+        cls, d: Any, *, require_host_user: bool = True
+    ) -> "ImapSettings":
         if not isinstance(d, dict):
             raise ValueError(f"Expected a JSON object, got {type(d).__name__}")
         host = _require_clean_str(d, "host", max_len=253, default="").strip()
@@ -150,6 +185,11 @@ class ImapSettings:
         folder = _require_clean_str(d, "folder", max_len=200, default="").strip()
         if not folder:
             folder = "INBOX"
+        drafts_folder = _require_clean_str(
+            d, "drafts_folder", max_len=200, default=""
+        ).strip()
+        if not drafts_folder:
+            drafts_folder = default_drafts_folder(host)
         if require_host_user:
             if not host:
                 raise ValueError("'host' must not be empty")
@@ -159,7 +199,61 @@ class ImapSettings:
             raise ValueError("'host' is not a valid hostname")
         if not _FOLDER_RE.match(folder):
             raise ValueError("'folder' contains unsupported characters")
-        return cls(host=host, user=user, password=password, folder=folder)
+        if not _FOLDER_RE.match(drafts_folder):
+            raise ValueError("'drafts_folder' contains unsupported characters")
+        return cls(
+            host=host,
+            user=user,
+            password=password,
+            folder=folder,
+            drafts_folder=drafts_folder,
+        )
+
+
+@dataclass(frozen=True)
+class ProcessRequest:
+    """A request to run the same queue-producing pipeline as the CLI.
+
+    ``limit``, ``anonymizer``, and ``task`` mirror the ``start``/``start-imap``
+    flags. Everything is validated against fixed bounds and allowlists here —
+    the browser never gets to pass arbitrary configuration or filesystem
+    paths into the pipeline.
+    """
+
+    source: str
+    days: int
+    limit: int | None
+    anonymizer: str
+    task: str  # "" means "use the CLI default task"
+
+    @classmethod
+    def from_json_dict(cls, d: Any) -> "ProcessRequest":
+        if not isinstance(d, dict):
+            raise ValueError(f"Expected a JSON object, got {type(d).__name__}")
+        source = d.get("source")
+        if source not in PROCESS_SOURCES:
+            raise ValueError(f"'source' must be one of {sorted(PROCESS_SOURCES)}")
+        days = d.get("days", 7)
+        if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 365:
+            raise ValueError("'days' must be an integer from 1 to 365")
+        limit = d.get("limit")
+        if limit is not None and (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_PROCESS_LIMIT
+        ):
+            raise ValueError(
+                f"'limit' must be an integer from 1 to {MAX_PROCESS_LIMIT}, or null"
+            )
+        anonymizer = d.get("anonymizer", "combined")
+        if anonymizer not in PROCESS_ANONYMIZERS:
+            raise ValueError(
+                f"'anonymizer' must be one of {sorted(PROCESS_ANONYMIZERS)}"
+            )
+        task = _require_clean_str(d, "task", max_len=MAX_TASK_CHARS, default="").strip()
+        return cls(
+            source=source, days=days, limit=limit, anonymizer=anonymizer, task=task
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +278,7 @@ def write_env_keys(env_path: Path, updates: dict[str, str]) -> None:
             raise ValueError(f"refusing to write control characters into {key}")
 
     lines = (
-        env_path.read_text(encoding="utf-8").splitlines()
-        if env_path.exists()
-        else []
+        env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
     )
     remaining = dict(updates)
     out: list[str] = []
@@ -239,6 +331,39 @@ class ServerConfig:
     port: int = DEFAULT_PORT
 
 
+@dataclass
+class ProcessingJob:
+    """Thread-safe state published by one background pipeline run."""
+
+    id: str
+    source: str
+    days: int
+    limit: int | None = None
+    anonymizer: str = "combined"
+    task: str = ""  # "" = the CLI default task instruction
+    status: str = "running"
+    started_at: str = field(
+        default_factory=lambda: datetime.now().astimezone().isoformat()
+    )
+    finished_at: str | None = None
+    message: str = "Processing mail…"
+    exit_code: int | None = None
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "source": self.source,
+            "days": self.days,
+            "limit": self.limit,
+            "anonymizer": self.anonymizer,
+            "status": self.status,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "message": self.message,
+            "exit_code": self.exit_code,
+        }
+
+
 def _write_token_file(path: Path, token: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -259,6 +384,8 @@ class TriageAPIServer(ThreadingHTTPServer):
         # One lock serializes every write (ledger, session log, .env, drafts):
         # a torn .env read-modify-write could drop ANTHROPIC_API_KEY.
         self.write_lock = threading.Lock()
+        self.processing_lock = threading.Lock()
+        self.processing_job: ProcessingJob | None = None
         self.session_path = (
             config.sessions_dir
             / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_web.jsonl"
@@ -279,6 +406,40 @@ class TriageAPIServer(ThreadingHTTPServer):
 
 def create_server(config: ServerConfig | None = None) -> TriageAPIServer:
     return TriageAPIServer(config or ServerConfig())
+
+
+def _run_pipeline(config: ServerConfig, job: ProcessingJob) -> int:
+    """Lazy CLI import keeps API startup light while sharing the real pipeline."""
+    from src.cli import run_queued_pipeline
+
+    return run_queued_pipeline(
+        source=job.source,
+        inbox_dir=config.inbox_dir,
+        queue_dir=config.queue_dir,
+        days=job.days,
+        limit=job.limit,
+        anonymizer=job.anonymizer,
+        task=job.task or None,
+    )
+
+
+def _processing_worker(server: TriageAPIServer, job: ProcessingJob) -> None:
+    """Run one pipeline job; detailed Rich progress remains visible in the terminal."""
+    try:
+        exit_code = _run_pipeline(server.config, job)
+    except Exception:
+        logger.exception("%s pipeline job %s failed", job.source, job.id)
+        exit_code = 1
+
+    with server.processing_lock:
+        job.exit_code = exit_code
+        job.finished_at = datetime.now().astimezone().isoformat()
+        if exit_code == 0:
+            job.status = "succeeded"
+            job.message = "Processing complete — the review queue is up to date."
+        else:
+            job.status = "failed"
+            job.message = "Processing failed. Check the API terminal for details."
 
 
 # ---------------------------------------------------------------------------
@@ -332,8 +493,8 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
 
         if method == "POST":
             origin = self.headers.get("Origin")
-            if origin is not None and origin not in ALLOWED_ORIGINS:
-                self._reject(403, "forbidden: cross-origin request")
+            if origin not in ALLOWED_ORIGINS:
+                self._reject(403, "forbidden: missing or cross-origin request")
                 return False
 
             ctype = (self.headers.get("Content-Type") or "").partition(";")[0]
@@ -364,6 +525,8 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
         try:
             if self.path == "/api/queue":
                 self._handle_queue()
+            elif self.path == "/api/process/status":
+                self._handle_process_status()
             elif self.path == "/api/settings/imap":
                 self._handle_settings_get()
             else:
@@ -379,8 +542,12 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
             body = self._read_body()
             if self.path == "/api/review":
                 self._handle_review(body)
-            elif self.path == "/api/open-inbox":
-                self._handle_open_inbox()
+            elif self.path == "/api/process":
+                self._handle_process(body)
+            elif self.path == "/api/reset":
+                self._handle_reset()
+            elif self.path == "/api/import-mbox":
+                self._handle_import_mbox()
             elif self.path == "/api/settings/imap":
                 self._handle_settings_post(body)
             elif self.path == "/api/settings/imap/test":
@@ -420,11 +587,9 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
         config = self.server.config
         with self.server.write_lock:
             pending = review_queue.pending_records(config.queue_dir)
-            rec = next((r for r in pending if r.email.id == req.email_id), None)
+            rec = next((r for r in pending if r.record_id == req.record_id), None)
             if rec is None:
-                self._send_json(
-                    400, {"error": "unknown or already-reviewed email_id"}
-                )
+                self._send_json(400, {"error": "unknown or already-reviewed record_id"})
                 return
 
             p = processed_from_record(rec)
@@ -444,15 +609,23 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
                         400, {"error": f"cannot {req.action} with an empty draft"}
                     )
                     return
-                outcome = persist_approved(
-                    p, req.draft, config.approved_dir, rec.source
-                )
+                try:
+                    outcome = persist_approved(
+                        p,
+                        req.draft,
+                        config.approved_dir,
+                        rec.source,
+                        rec.imap_account,
+                    )
+                except ImapAccountMismatchError as exc:
+                    self._send_json(409, {"error": str(exc)})
+                    return
                 saved_path = outcome.txt_path
                 note = outcome.note
                 warning = outcome.warning
 
             review_queue.append_reviewed(
-                config.queue_dir, rec.email.id, req.action, saved_path
+                config.queue_dir, rec.record_id, rec.email.id, req.action, saved_path
             )
             append_session_record(
                 self.server.session_path, session_record(p, req.action, saved_path)
@@ -469,34 +642,205 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
-    # --- POST /api/open-inbox --------------------------------------------------
+    # --- GET/POST /api/process ---------------------------------------------
 
-    def _handle_open_inbox(self) -> None:
-        """Open Finder at the fixed ``data/inbox`` folder.
+    def _handle_process_status(self) -> None:
+        with self.server.processing_lock:
+            job = self.server.processing_job
+            payload = (
+                job.to_json_dict()
+                if job is not None
+                else {
+                    "id": None,
+                    "source": None,
+                    "days": None,
+                    "limit": None,
+                    "anonymizer": None,
+                    "status": "idle",
+                    "started_at": None,
+                    "finished_at": None,
+                    "message": "No processing job has run yet.",
+                    "exit_code": None,
+                }
+            )
+        self._send_json(200, payload)
 
-        The path is decided entirely server-side; any client-supplied body is
-        ignored so this can never be steered at another directory.
+    def _handle_process(self, body: bytes) -> None:
+        try:
+            req = ProcessRequest.from_json_dict(json.loads(body or b"null"))
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            self._send_json(400, {"error": str(exc)})
+            return
+
+        with self.server.processing_lock:
+            current = self.server.processing_job
+            if current is not None and current.status == "running":
+                self._send_json(409, {"error": "mail processing is already running"})
+                return
+            job = ProcessingJob(
+                id=secrets.token_urlsafe(9),
+                source=req.source,
+                days=req.days,
+                limit=req.limit,
+                anonymizer=req.anonymizer,
+                task=req.task,
+            )
+            job.message = (
+                "Fetching and processing unread IMAP mail…"
+                if req.source == "imap"
+                else "Processing uploaded .mbox files…"
+            )
+            self.server.processing_job = job
+            worker = threading.Thread(
+                target=_processing_worker,
+                args=(self.server, job),
+                name=f"triage-{req.source}-{job.id}",
+                daemon=True,
+            )
+            worker.start()
+
+        self._send_json(202, job.to_json_dict())
+
+    # --- POST /api/reset -------------------------------------------------------
+
+    def _handle_reset(self) -> None:
+        """Delete the two queue ledgers, mirroring the CLI `reset` command.
+
+        Approved drafts and session logs are never touched, and a reset is
+        refused while a processing job is running — the worker would append to
+        a ledger this just deleted, leaving a half-reset queue. The request
+        body is ignored; the confirmation happens in the UI.
         """
+        config = self.server.config
+        with self.server.processing_lock:
+            current = self.server.processing_job
+            if current is not None and current.status == "running":
+                self._send_json(
+                    409, {"error": "cannot reset the queue while processing mail"}
+                )
+                return
+            with self.server.write_lock:
+                n_processed = len(review_queue.load_records(config.queue_dir))
+                n_reviewed = len(review_queue.reviewed_ids(config.queue_dir))
+                for path in (
+                    review_queue.processed_path(config.queue_dir),
+                    review_queue.reviewed_path(config.queue_dir),
+                ):
+                    path.unlink(missing_ok=True)
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "processed_deleted": n_processed,
+                "reviewed_deleted": n_reviewed,
+            },
+        )
+
+    # --- POST /api/import-mbox ------------------------------------------------
+
+    def _handle_import_mbox(self) -> None:
+        """Choose an mbox in a native dialog and copy it into ``data/inbox``.
+
+        The selected path comes only from a fixed AppleScript; any
+        client-supplied body is ignored. Existing inbox files are never
+        overwritten — a numeric suffix is added when names collide.
+        """
+        try:
+            result = subprocess.run(  # list form, fixed argv, no shell
+                ["osascript", "-e", _PICK_MBOX_SCRIPT],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            self._send_json(500, {"error": "could not open the .mbox file picker"})
+            return
+        if result.returncode != 0:
+            self._send_json(500, {"error": "could not open the .mbox file picker"})
+            return
+
+        selected = result.stdout.rstrip("\r\n")
+        if not selected:
+            self._send_json(200, {"ok": True, "cancelled": True, "path": None})
+            return
+        if any(ord(c) < 32 or ord(c) == 127 for c in selected):
+            self._send_json(400, {"error": "selected path contains control characters"})
+            return
+
+        source = Path(selected)
+        if not source.is_absolute():
+            self._send_json(400, {"error": "selected path must be absolute"})
+            return
+        try:
+            source = source.resolve(strict=True)
+        except OSError:
+            self._send_json(400, {"error": "selected file does not exist"})
+            return
+        if not source.is_file():
+            self._send_json(400, {"error": "selected path is not a file"})
+            return
+        if source.suffix.lower() != ".mbox":
+            self._send_json(400, {"error": "selected file must end in .mbox"})
+            return
+
         inbox = self.server.config.inbox_dir
         with self.server.write_lock:
             inbox.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(  # list form, fixed argv, no shell
-            ["open", str(inbox)], check=False, capture_output=True, timeout=15
+            destination = inbox / f"{source.stem}.mbox"
+            if source == destination.resolve(strict=False):
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "cancelled": False,
+                        "path": str(destination),
+                        "filename": destination.name,
+                    },
+                )
+                return
+            suffix = 2
+            while destination.exists():
+                destination = inbox / f"{source.stem}-{suffix}.mbox"
+                suffix += 1
+            temp_path: Path | None = None
+            try:
+                fd, temp_name = tempfile.mkstemp(prefix=".mbox-upload-", dir=inbox)
+                os.close(fd)
+                temp_path = Path(temp_name)
+                shutil.copy2(source, temp_path)
+                os.replace(temp_path, destination)
+            except OSError:
+                self._send_json(500, {"error": "could not copy the selected .mbox"})
+                return
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "cancelled": False,
+                "path": str(destination),
+                "filename": destination.name,
+            },
         )
-        if result.returncode != 0:
-            self._send_json(500, {"error": "could not open the inbox folder"})
-            return
-        self._send_json(200, {"ok": True, "path": str(inbox)})
 
     # --- GET/POST /api/settings/imap -------------------------------------------
 
     def _handle_settings_get(self) -> None:
+        host = os.environ.get("IMAP_HOST", "").strip()
         self._send_json(
             200,
             {
-                "host": os.environ.get("IMAP_HOST", "").strip(),
+                "host": host,
                 "user": os.environ.get("IMAP_USER", "").strip(),
                 "folder": os.environ.get("IMAP_FOLDER", "").strip() or "INBOX",
+                "drafts_folder": (
+                    os.environ.get("IMAP_DRAFTS_FOLDER", "").strip()
+                    or default_drafts_folder(host)
+                ),
                 # The password itself is write-only: report presence, never value.
                 "password": "set" if os.environ.get("IMAP_PASS") else "unset",
             },
@@ -513,12 +857,20 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
             "IMAP_HOST": settings.host,
             "IMAP_USER": settings.user,
             "IMAP_FOLDER": settings.folder,
+            "IMAP_DRAFTS_FOLDER": settings.drafts_folder,
         }
         if settings.password:
             updates["IMAP_PASS"] = settings.password
-        with self.server.write_lock:
-            write_env_keys(self.server.config.env_path, updates)
-        os.environ.update(updates)
+        with self.server.processing_lock:
+            current = self.server.processing_job
+            if current is not None and current.status == "running":
+                self._send_json(
+                    409, {"error": "cannot change IMAP settings while processing mail"}
+                )
+                return
+            with self.server.write_lock:
+                write_env_keys(self.server.config.env_path, updates)
+                os.environ.update(updates)
 
         self._send_json(
             200,
@@ -540,23 +892,40 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
         username or password.
         """
         try:
+            incoming = json.loads(body or b"{}") or {}
+            if not isinstance(incoming, dict):
+                raise ValueError(
+                    f"Expected a JSON object, got {type(incoming).__name__}"
+                )
+            host = incoming.get("host") or os.environ.get("IMAP_HOST", "")
+            drafts_folder = (
+                incoming.get("drafts_folder")
+                or os.environ.get("IMAP_DRAFTS_FOLDER", "")
+                or default_drafts_folder(str(host))
+            )
             settings = ImapSettings.from_json_dict(
-                json.loads(body or b"{}") or {}, require_host_user=False
+                {
+                    "host": host,
+                    "user": incoming.get("user") or os.environ.get("IMAP_USER", ""),
+                    "password": incoming.get("password")
+                    or os.environ.get("IMAP_PASS", ""),
+                    "folder": incoming.get("folder")
+                    or os.environ.get("IMAP_FOLDER", "")
+                    or "INBOX",
+                    "drafts_folder": drafts_folder,
+                },
+                require_host_user=False,
             )
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             self._send_json(400, {"error": str(exc)})
             return
 
-        host = settings.host or os.environ.get("IMAP_HOST", "").strip()
-        user = settings.user or os.environ.get("IMAP_USER", "").strip()
-        password = settings.password or os.environ.get("IMAP_PASS", "")
-
         missing = [
             name
             for name, value in (
-                ("host", host),
-                ("username", user),
-                ("app password", password),
+                ("host", settings.host),
+                ("username", settings.user),
+                ("app password", settings.password),
             )
             if not value
         ]
@@ -566,15 +935,23 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        ok, message = _imap_check(host, user, password, settings.folder)
+        ok, message = _imap_check(
+            settings.host,
+            settings.user,
+            settings.password,
+            settings.folder,
+            settings.drafts_folder,
+        )
         if ok:
             self._send_json(200, {"ok": True, "message": message})
         else:
             self._send_json(200, {"ok": False, "error": message})
 
 
-def _imap_check(host: str, user: str, password: str, folder: str) -> tuple[bool, str]:
-    """Connect / login / select read-only; report a credential-free message."""
+def _imap_check(
+    host: str, user: str, password: str, folder: str, drafts_folder: str
+) -> tuple[bool, str]:
+    """Connect, log in, and verify both mailboxes with read-only SELECTs."""
     try:
         client = imaplib.IMAP4_SSL(host, timeout=IMAP_PROVIDER_TIMEOUT_SECS)
     except OSError as exc:
@@ -597,7 +974,16 @@ def _imap_check(host: str, user: str, password: str, folder: str) -> tuple[bool,
             count = int(data[0] or b"0")
         except (TypeError, ValueError):
             count = 0
-        return True, f"connected — folder {folder!r} has {count} message(s)"
+        status, _ = client.select(drafts_folder, readonly=True)
+        if status != "OK":
+            return False, (
+                "logged in, but could not open Drafts folder "
+                f"{drafts_folder!r}; check the provider setting"
+            )
+        return True, (
+            f"connected — folder {folder!r} has {count} message(s); "
+            f"Drafts folder {drafts_folder!r} verified"
+        )
     except OSError as exc:
         return False, f"connection to {host} failed: {type(exc).__name__}"
     finally:
@@ -619,8 +1005,12 @@ def _record_dto(rec: review_queue.QueueRecord) -> dict[str, Any]:
     PII, the exact secret this product exists to protect) and raw ``headers``.
     The UI needs neither: the stored draft is already rehydrated server-side,
     so the panel only shows how many placeholders were involved.
+
+    ``record_id`` is the review key: an opaque hash, so it exposes no account
+    metadata (the DTO must never carry ``imap_account`` host/user either).
     """
     return {
+        "record_id": rec.record_id,
         "email": {
             "id": rec.email.id,
             "from_addr": rec.email.from_addr,

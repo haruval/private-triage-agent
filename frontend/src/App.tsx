@@ -1,17 +1,37 @@
 // The single-page review app: a top bar with the two leading actions
-// (Upload mbox, Connect IMAP), the review queue as the main view, and the
+// (Upload .mbox, Connect IMAP), the review queue as the main view, and the
 // IMAP settings as a simple state-switched second view (no router). The
 // queue polls /api/queue every 15s; approving/rejecting advances to the
-// next pending record, exactly like the terminal `review` loop.
-import { useCallback, useEffect, useRef, useState } from 'react'
+// next pending record, exactly like the terminal `review` loop. Records are
+// keyed by the opaque record_id — the same Message-ID can be pending once
+// per IMAP account, so email.id is display-only.
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import type { QueueRecordDTO, ReviewAction } from './api'
-import { fetchQueue, openInbox, postReview } from './api'
+import type {
+  Anonymizer,
+  ProcessingOptions,
+  ProcessingSource,
+  ProcessingStatus,
+  QueueRecordDTO,
+  ReviewAction,
+} from './api'
+import {
+  DEFAULT_PROCESSING_OPTIONS,
+  fetchProcessingStatus,
+  fetchQueue,
+  importMbox,
+  postReview,
+  resetQueue,
+  startProcessing,
+} from './api'
+import type { MdSelectElement, MdTextFieldElement } from './declarations'
 import QueueList from './QueueList'
 import RecordDetail from './RecordDetail'
 import SettingsView from './SettingsView'
 
 const POLL_MS = 15_000
+const PROCESS_POLL_MS = 2_000
+const MAX_PROCESS_LIMIT = 10_000
 
 type View = 'queue' | 'settings'
 
@@ -21,9 +41,17 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [edits, setEdits] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [processing, setProcessing] = useState<ProcessingStatus | null>(null)
+  const [options, setOptions] = useState<ProcessingOptions>(DEFAULT_PROCESSING_OPTIONS)
+  const [optionsOpen, setOptionsOpen] = useState(false)
+  const [resetting, setResetting] = useState(false)
   const [apiError, setApiError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef<number | undefined>(undefined)
+  const processingRef = useRef<ProcessingStatus | null>(null)
+  const processInitialized = useRef(false)
+  const handledProcessId = useRef<string | null>(null)
 
   const showToast = useCallback((message: string) => {
     setToast(message)
@@ -47,14 +75,64 @@ export default function App() {
     return () => window.clearInterval(id)
   }, [refresh])
 
-  const list = records ?? []
-  const selected = list.find((r) => r.email.id === selectedId) ?? list[0] ?? null
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const next = await fetchProcessingStatus()
+        if (cancelled) return
+        const current = processingRef.current
+        processingRef.current = next
+        setProcessing(next)
+        if (!processInitialized.current) {
+          processInitialized.current = true
+          if (next.status !== 'running') handledProcessId.current = next.id
+          return
+        }
+        if (current?.status === 'running' && next.id !== current.id) {
+          // The job we were watching is gone. The API rejects overlapping
+          // jobs, so a running job can only vanish when the server restarted
+          // mid-run — adopt the server's state instead of waiting forever
+          // for a dead job, and tell the user what happened.
+          if (next.status !== 'running') handledProcessId.current = next.id
+          showToast('Processing was interrupted (API restarted) — the queue may be partial')
+          void refresh()
+          return
+        }
+        if (
+          next.id &&
+          next.status !== 'running' &&
+          next.status !== 'idle' &&
+          handledProcessId.current !== next.id
+        ) {
+          handledProcessId.current = next.id
+          if (next.status === 'succeeded') {
+            showToast('Mail processing complete — review queue refreshed')
+            void refresh()
+          } else {
+            showToast(`error: ${next.message}`)
+          }
+        }
+      } catch {
+        // Queue polling already reports API connectivity failures prominently.
+      }
+    }
+    void poll()
+    const id = window.setInterval(() => void poll(), PROCESS_POLL_MS)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [refresh, showToast])
+
+  const list = useMemo(() => records ?? [], [records])
+  const selected = list.find((r) => r.record_id === selectedId) ?? list[0] ?? null
 
   const handleAction = useCallback(
     async (record: QueueRecordDTO, action: ReviewAction, draft: string) => {
       setBusy(true)
       try {
-        const resp = await postReview(record.email.id, action, draft)
+        const resp = await postReview(record.record_id, action, draft)
         const parts: string[] = []
         if (action === 'reject') {
           parts.push('rejected — nothing saved')
@@ -66,17 +144,17 @@ export default function App() {
         showToast(parts.join('  •  '))
 
         // Drop the reviewed record locally and advance to the next one.
-        const idx = list.findIndex((r) => r.email.id === record.email.id)
-        const next = list.filter((r) => r.email.id !== record.email.id)
+        const idx = list.findIndex((r) => r.record_id === record.record_id)
+        const next = list.filter((r) => r.record_id !== record.record_id)
         const nextSelected =
           next.length === 0
             ? null
-            : next[Math.min(Math.max(idx, 0), next.length - 1)].email.id
+            : next[Math.min(Math.max(idx, 0), next.length - 1)].record_id
         setRecords(next)
         setSelectedId(nextSelected)
         setEdits((prev) => {
           const rest = { ...prev }
-          delete rest[record.email.id]
+          delete rest[record.record_id]
           return rest
         })
         void refresh()
@@ -89,14 +167,80 @@ export default function App() {
     [list, refresh, showToast],
   )
 
+  const beginProcessing = useCallback(
+    async (source: ProcessingSource, days = 7) => {
+      const next = await startProcessing(source, days, options)
+      processInitialized.current = true
+      handledProcessId.current = next.status === 'running' ? null : next.id
+      processingRef.current = next
+      setProcessing(next)
+      if (next.status === 'running') {
+        showToast(
+          source === 'imap'
+            ? 'Fetching and processing unread IMAP mail…'
+            : 'Processing uploaded .mbox mail…',
+        )
+      } else if (next.status === 'succeeded') {
+        showToast('Mail processing complete — review queue refreshed')
+        await refresh()
+      } else {
+        throw new Error(next.message)
+      }
+    },
+    [options, refresh, showToast],
+  )
+
   const handleUploadMbox = useCallback(async () => {
+    setUploading(true)
     try {
-      await openInbox()
-      showToast('Drop .mbox files into data/inbox, then run `python -m src.cli start`')
+      const resp = await importMbox()
+      if (resp.cancelled) {
+        showToast('Upload cancelled')
+      } else {
+        showToast(`${resp.filename ?? 'Selected .mbox'} copied to data/inbox`)
+        await beginProcessing('mbox')
+      }
     } catch (err) {
       showToast(`error: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setUploading(false)
     }
-  }, [showToast])
+  }, [beginProcessing, showToast])
+
+  const handleStartImap = useCallback(
+    async (days: number) => {
+      await beginProcessing('imap', days)
+      setView('queue')
+    },
+    [beginProcessing],
+  )
+
+  const handleReset = useCallback(async () => {
+    setResetting(true)
+    try {
+      const resp = await resetQueue()
+      setOptionsOpen(false)
+      setRecords([])
+      setSelectedId(null)
+      setEdits({})
+      showToast(
+        `Queue reset — ${resp.processed_deleted} processed record(s) and ` +
+          `${resp.reviewed_deleted} review decision(s) deleted; approved ` +
+          'drafts and session logs are kept',
+      )
+      void refresh()
+    } catch (err) {
+      showToast(`error: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setResetting(false)
+    }
+  }, [refresh, showToast])
+
+  const isProcessing = processing?.status === 'running'
+  const optionsCustomized =
+    options.limit !== null ||
+    options.anonymizer !== DEFAULT_PROCESSING_OPTIONS.anonymizer ||
+    options.task.trim() !== ''
 
   return (
     <div className="app">
@@ -105,14 +249,16 @@ export default function App() {
         <md-filled-tonal-button
           type="button"
           className="topbar-action flat-tonal-action"
+          disabled={uploading || isProcessing}
           onClick={() => void handleUploadMbox()}
         >
-          Upload .mbox
+          {uploading ? 'Selecting…' : 'Upload .mbox'}
         </md-filled-tonal-button>
         {view === 'queue' ? (
           <md-filled-tonal-button
             type="button"
             className="topbar-action flat-tonal-action"
+            disabled={isProcessing}
             onClick={() => setView('settings')}
           >
             Connect IMAP
@@ -126,6 +272,14 @@ export default function App() {
             ← Back to queue
           </md-filled-tonal-button>
         )}
+        <md-filled-tonal-button
+          type="button"
+          className="topbar-action flat-tonal-action"
+          disabled={isProcessing}
+          onClick={() => setOptionsOpen(true)}
+        >
+          {optionsCustomized ? 'Options *' : 'Options'}
+        </md-filled-tonal-button>
         <span className="spacer" />
         {view === 'queue' && (
           <>
@@ -143,6 +297,14 @@ export default function App() {
         )}
       </header>
 
+      {isProcessing && processing && (
+        <div className="processing-banner" role="status">
+          <span>{processing.message}</span>
+          <md-linear-progress indeterminate />
+          <span className="dim">Detailed progress is also visible in the API terminal.</span>
+        </div>
+      )}
+
       {apiError && (
         <div className="api-error" role="alert">
           API unreachable ({apiError}) — is the backend running? Start it with
@@ -151,7 +313,11 @@ export default function App() {
       )}
 
       {view === 'settings' ? (
-        <SettingsView showToast={showToast} />
+        <SettingsView
+          showToast={showToast}
+          processing={isProcessing}
+          onStartImap={handleStartImap}
+        />
       ) : records === null ? (
         <div className="empty-state dim">Loading queue…</div>
       ) : list.length === 0 ? (
@@ -160,8 +326,7 @@ export default function App() {
             Nothing to review — the queue is empty.
           </p>
           <p className="dim">
-            Run <code>python -m src.cli start</code> (or <code>start-imap</code>) to
-            process new mail.
+            Upload an .mbox file or connect IMAP to fetch and process new mail.
           </p>
           <md-outlined-button type="button" onClick={() => void refresh()}>
             Refresh
@@ -171,7 +336,7 @@ export default function App() {
         <main className="main">
           <QueueList
             records={list}
-            selectedId={selected?.email.id ?? null}
+            selectedId={selected?.record_id ?? null}
             onSelect={setSelectedId}
           />
           {selected && (
@@ -179,10 +344,10 @@ export default function App() {
               record={selected}
               index={list.indexOf(selected) + 1}
               total={list.length}
-              draftText={edits[selected.email.id] ?? selected.draft ?? ''}
+              draftText={edits[selected.record_id] ?? selected.draft ?? ''}
               busy={busy}
               onDraftChange={(text) =>
-                setEdits((prev) => ({ ...prev, [selected.email.id]: text }))
+                setEdits((prev) => ({ ...prev, [selected.record_id]: text }))
               }
               onAction={(rec, action, draft) => void handleAction(rec, action, draft)}
             />
@@ -190,11 +355,207 @@ export default function App() {
         </main>
       )}
 
+      {optionsOpen && (
+        <OptionsDialog
+          options={options}
+          onSave={(next) => {
+            setOptions(next)
+            setOptionsOpen(false)
+            showToast('Processing options saved for this session')
+          }}
+          onClose={() => setOptionsOpen(false)}
+          onReset={handleReset}
+          processing={isProcessing}
+          resetting={resetting}
+        />
+      )}
+
       {toast && (
         <div className="toast" role="status">
           {toast}
         </div>
       )}
+    </div>
+  )
+}
+
+// Options groups the advanced start/start-imap flags and the destructive queue
+// reset into separate sidebar sections. Field edits are local until Save, so
+// closing the popup is always a true no-op. Router/eval flags stay terminal-only.
+const ANONYMIZERS: { id: Anonymizer; label: string; hint: string }[] = [
+  { id: 'regex', label: 'regex', hint: 'fixed-shape PII only (fastest)' },
+  { id: 'combined', label: 'combined', hint: 'regex + NER (default)' },
+  { id: 'coref', label: 'coref', hint: 'regex + NER + coreference (slowest)' },
+]
+
+function OptionsDialog({
+  options,
+  onSave,
+  onClose,
+  onReset,
+  processing,
+  resetting,
+}: {
+  options: ProcessingOptions
+  onSave: (next: ProcessingOptions) => void
+  onClose: () => void
+  onReset: () => Promise<void>
+  processing: boolean
+  resetting: boolean
+}) {
+  const [section, setSection] = useState<'advanced' | 'reset'>('advanced')
+  const [limitText, setLimitText] = useState(
+    options.limit === null ? '' : String(options.limit),
+  )
+  const [anonymizer, setAnonymizer] = useState<Anonymizer>(options.anonymizer)
+  const [task, setTask] = useState(options.task)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSave = () => {
+    const trimmed = limitText.trim()
+    let limit: number | null = null
+    if (trimmed !== '') {
+      const parsed = Number(trimmed)
+      if (
+        !Number.isInteger(parsed) ||
+        parsed < 1 ||
+        parsed > MAX_PROCESS_LIMIT
+      ) {
+        setError(`Processing limit must be a whole number from 1 to ${MAX_PROCESS_LIMIT}.`)
+        return
+      }
+      limit = parsed
+    }
+    onSave({ limit, anonymizer, task: task.trim() })
+  }
+
+  return (
+    <div
+      className="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="options-dialog-title"
+    >
+      <div className="modal-card options-card">
+        <header className="options-dialog-header">
+          <h3 id="options-dialog-title" className="md-typescale-title-medium">
+            Options
+          </h3>
+        </header>
+        <div className="options-layout">
+          <nav className="options-sidebar" aria-label="Options sections">
+            <button
+              type="button"
+              className={`options-nav-button ${section === 'advanced' ? 'active' : ''}`}
+              aria-current={section === 'advanced' ? 'page' : undefined}
+              onClick={() => setSection('advanced')}
+            >
+              Advanced
+            </button>
+            <button
+              type="button"
+              className={`options-nav-button ${section === 'reset' ? 'active' : ''}`}
+              aria-current={section === 'reset' ? 'page' : undefined}
+              onClick={() => setSection('reset')}
+            >
+              Reset
+            </button>
+          </nav>
+
+          <section className="options-content">
+            {section === 'advanced' ? (
+              <>
+                <h4 className="md-typescale-title-medium">Advanced</h4>
+                <p className="dim">
+                  Applied to every processing run started from this page (mbox
+                  uploads and IMAP). Leave everything as-is for the defaults.
+                </p>
+                <div className="modal-form">
+                  <md-outlined-text-field
+                    label="Processing limit"
+                    type="number"
+                    min="1"
+                    max={String(MAX_PROCESS_LIMIT)}
+                    value={limitText}
+                    placeholder="all new mail"
+                    supporting-text="process at most N new emails per run"
+                    onInput={(e) =>
+                      setLimitText((e.currentTarget as MdTextFieldElement).value)
+                    }
+                  />
+                  <md-outlined-select
+                    label="Anonymizer"
+                    value={anonymizer}
+                    onInput={(e) =>
+                      setAnonymizer(
+                        (e.currentTarget as MdSelectElement).value as Anonymizer,
+                      )
+                    }
+                  >
+                    {ANONYMIZERS.map((a) => (
+                      <md-select-option
+                        key={a.id}
+                        value={a.id}
+                        selected={a.id === anonymizer}
+                      >
+                        <div slot="headline">{a.label}</div>
+                        <div slot="supporting-text">{a.hint}</div>
+                      </md-select-option>
+                    ))}
+                  </md-outlined-select>
+                  <md-outlined-text-field
+                    label="Task instruction"
+                    value={task}
+                    placeholder="default: draft a concise, professional reply"
+                    supporting-text="one line, sent to Claude for escalated emails (placeholders only, never raw PII)"
+                    onInput={(e) =>
+                      setTask((e.currentTarget as MdTextFieldElement).value)
+                    }
+                  />
+                </div>
+                {error && (
+                  <div className="settings-status settings-status-error" role="alert">
+                    {error}
+                  </div>
+                )}
+                <div className="modal-actions">
+                  <md-outlined-button type="button" onClick={onClose}>
+                    Cancel
+                  </md-outlined-button>
+                  <md-filled-button type="button" onClick={handleSave}>
+                    Save options
+                  </md-filled-button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h4 className="md-typescale-title-medium">Reset</h4>
+                <p>
+                  Reset the review queue so the next processing run treats every
+                  email as new — including everything already reviewed.
+                </p>
+                <div className="reset-warning">
+                  This permanently deletes the processed and reviewed ledgers.
+                  Approved drafts and session logs are not touched, matching the
+                  terminal <code>reset</code> command.
+                </div>
+                <div className="modal-actions">
+                  <md-outlined-button type="button" disabled={resetting} onClick={onClose}>
+                    Cancel
+                  </md-outlined-button>
+                  <md-filled-button
+                    type="button"
+                    disabled={processing || resetting}
+                    onClick={() => void onReset()}
+                  >
+                    {resetting ? 'Resetting…' : 'Reset queue'}
+                  </md-filled-button>
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      </div>
     </div>
   )
 }

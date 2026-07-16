@@ -10,6 +10,7 @@ rehydrate round-trip is checked without a model.
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import queue
@@ -23,6 +24,7 @@ import pytest
 from src.cli import _build_processed, _email_payload, _process_worker
 from src.ingestion.mbox_loader import Email
 from src.review_actions import (
+    ImapAccountMismatchError,
     ProcessedEmail,
     build_reply_message,
     persist_approved,
@@ -32,6 +34,7 @@ from src.review_actions import (
     session_record,
     source_is_imap,
 )
+from src.review_queue import ImapAccountRef
 from src.router.sensitivity_scorer import EscalationDecision
 from src.triage.classifier import TriageResult
 
@@ -55,7 +58,9 @@ class _EchoClaude:
     model = "fake-claude"
 
     def delegate(self, anonymized_email: str, anonymized_thread: Any, task: str) -> str:
-        assert "Email_E1" in anonymized_email  # the PII was anonymized before delegation
+        assert (
+            "Email_E1" in anonymized_email
+        )  # the PII was anonymized before delegation
         assert "alice@example.com" not in anonymized_email
         return "Sure — I'll follow up with Email_E1 today."
 
@@ -82,7 +87,9 @@ class _FakeScorer:
 # ---------------------------------------------------------------------------
 
 
-def _email(body: str = "ping", subject: str = "Hi", email_id: str = "<abc@host>") -> Email:
+def _email(
+    body: str = "ping", subject: str = "Hi", email_id: str = "<abc@host>"
+) -> Email:
     return Email(
         id=email_id,
         from_addr="alice@example.com",
@@ -95,7 +102,9 @@ def _email(body: str = "ping", subject: str = "Hi", email_id: str = "<abc@host>"
     )
 
 
-def _result(draft: str | None = "local draft", category: str = "needs_reply") -> TriageResult:
+def _result(
+    draft: str | None = "local draft", category: str = "needs_reply"
+) -> TriageResult:
     return TriageResult(
         category=category,
         confidence=0.9,
@@ -107,7 +116,9 @@ def _result(draft: str | None = "local draft", category: str = "needs_reply") ->
 
 
 def _decision(escalate: bool) -> EscalationDecision:
-    return EscalationDecision(escalate=escalate, reason="because", score=0.6 if escalate else 0.1)
+    return EscalationDecision(
+        escalate=escalate, reason="because", score=0.6 if escalate else 0.1
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -250,28 +261,36 @@ def test_reply_subject_prefixes_once() -> None:
     assert reply_subject("") == "Re: (no subject)"
 
 
-def test_build_reply_message_headers_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("IMAP_USER", "me@example.com")
+def test_build_reply_message_headers_and_body() -> None:
     p = _processed("the reply", email_id="<orig@host>")
-    msg = build_reply_message(p, "the reply")
-    assert msg["To"] == "alice@example.com"       # reply goes to the sender
-    assert msg["From"] == "me@example.com"          # from IMAP_USER
+    msg = build_reply_message(p, "the reply", sender="me@example.com")
+    assert msg["To"] == "alice@example.com"  # reply goes to the sender
+    assert msg["From"] == "me@example.com"  # the explicitly passed account
     assert msg["Subject"] == "Re: Hi"
-    assert msg["In-Reply-To"] == "<orig@host>"      # threads to the original
+    assert msg["In-Reply-To"] == "<orig@host>"  # threads to the original
     assert msg["References"] == "<orig@host>"
     assert msg["X-Draft-Provenance"] == "local"
     assert msg.get_content().strip() == "the reply"
 
 
-def test_build_reply_message_skips_threading_for_synthetic_id(
+def test_build_reply_message_ignores_global_imap_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("IMAP_USER", raising=False)
+    """No sender passed -> no From, even with an unrelated IMAP account
+    configured — the mail client must pick the sending account for mbox
+    replies, not whatever IMAP connection happens to be saved."""
+    monkeypatch.setenv("IMAP_USER", "unrelated-account@gmail.com")
+    msg = build_reply_message(_processed("body"), "body")
+    assert "From" not in msg
+    assert "unrelated-account@gmail.com" not in msg.as_string()
+
+
+def test_build_reply_message_skips_threading_for_synthetic_id() -> None:
     p = _processed("body", email_id="<sha1:deadbeef@local>")
     msg = build_reply_message(p, "body")
     assert "In-Reply-To" not in msg  # a content-hash id is not a real Message-ID
     assert "References" not in msg
-    assert "From" not in msg  # no IMAP_USER set -> client fills it in
+    assert "From" not in msg  # no sender passed -> client fills it in
 
 
 # ---------------------------------------------------------------------------
@@ -286,48 +305,181 @@ def testsource_is_imap() -> None:
     assert not source_is_imap("")  # unknown/legacy -> treat as mbox
 
 
+def _imap_env(monkeypatch: pytest.MonkeyPatch, account: ImapAccountRef) -> None:
+    monkeypatch.setenv("IMAP_HOST", account.host)
+    monkeypatch.setenv("IMAP_USER", account.user)
+
+
+def _gmail_account(user: str = "me@gmail.com") -> ImapAccountRef:
+    return ImapAccountRef(
+        host="imap.gmail.com", user=user, drafts_folder="[Gmail]/Drafts"
+    )
+
+
 def test_persist_mbox_source_writes_eml_no_imap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[bytes] = []
-    monkeypatch.setattr("src.review_actions.append_to_drafts", lambda raw: calls.append(raw))
+    monkeypatch.setattr(
+        "src.review_actions.append_to_drafts", lambda raw: calls.append(raw)
+    )
     out = tmp_path / "approved"
     txt = persist_approved(_processed("hi"), "hi", out, "mbox:enron_50.mbox").txt_path
     assert txt.suffix == ".txt" and txt.exists()
     assert list(out.glob("*.eml"))  # .eml emitted for mbox
-    assert calls == []              # never touches IMAP
+    assert calls == []  # never touches IMAP
+
+
+def test_persist_mbox_eml_has_no_from_with_unrelated_imap_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An mbox approval while some other IMAP account is configured must not
+    stamp that account into the .eml's From header."""
+    _imap_env(monkeypatch, _gmail_account("unrelated@gmail.com"))
+    out = tmp_path / "approved"
+    persist_approved(_processed("hi"), "hi", out, "mbox:enron_50.mbox")
+    eml = next(out.glob("*.eml")).read_bytes().decode()
+    assert "unrelated@gmail.com" not in eml
+    assert not eml.startswith("From:") and "\nFrom:" not in eml
 
 
 def test_persist_imap_source_appends_draft_no_eml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    account = _gmail_account()
+    _imap_env(monkeypatch, account)
     calls: list[bytes] = []
-    monkeypatch.setattr("src.review_actions.append_to_drafts", lambda raw: calls.append(raw))
+
+    def _append(raw: bytes, *, folder: str | None = None) -> None:
+        calls.append(raw)
+
+    monkeypatch.setattr("src.review_actions.append_to_drafts", _append)
     out = tmp_path / "approved"
-    txt = persist_approved(_processed("hi"), "hi", out, "imap:INBOX").txt_path
+    txt = persist_approved(_processed("hi"), "hi", out, "imap:INBOX", account).txt_path
     assert txt.suffix == ".txt" and txt.exists()
     assert not list(out.glob("*.eml"))  # no .eml for imap
-    assert len(calls) == 1               # appended to Drafts once
+    assert len(calls) == 1  # appended to Drafts once
+    # The draft carries the stored account as From, not a global env read.
+    assert b"From: me@gmail.com" in calls[0]
 
 
 def test_persist_imap_append_failure_does_not_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def _boom(raw: bytes) -> None:
+    account = _gmail_account()
+    _imap_env(monkeypatch, account)
+
+    def _boom(raw: bytes, *, folder: str | None = None) -> None:
         raise RuntimeError("IMAP APPEND to 'Drafts' failed")
 
     monkeypatch.setattr("src.review_actions.append_to_drafts", _boom)
     out = tmp_path / "approved"
     # The .txt still lands even though the Drafts APPEND raised.
-    txt = persist_approved(_processed("hi"), "hi", out, "imap").txt_path
+    txt = persist_approved(_processed("hi"), "hi", out, "imap", account).txt_path
     assert txt.exists() and "hi" in txt.read_text()
+
+
+def test_persist_imap_without_account_metadata_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy queue records (imap source, no stored account) must not append a
+    draft into whatever account is configured now — the user is told to reject
+    and reprocess instead."""
+    _imap_env(monkeypatch, _gmail_account())
+    calls: list[bytes] = []
+    monkeypatch.setattr(
+        "src.review_actions.append_to_drafts", lambda raw, **kw: calls.append(raw)
+    )
+    with pytest.raises(ImapAccountMismatchError, match="reprocess"):
+        persist_approved(_processed("hi"), "hi", tmp_path, "imap", None)
+    assert calls == []
+    assert not list(tmp_path.glob("*.txt"))  # refused before anything was written
+
+
+def test_persist_imap_uses_ingested_account_and_drafts_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("IMAP_HOST", "imap.gmail.com")
+    monkeypatch.setenv("IMAP_USER", "me@gmail.com")
+    calls: list[tuple[bytes, str | None]] = []
+
+    def _append(raw: bytes, *, folder: str | None = None) -> None:
+        calls.append((raw, folder))
+
+    monkeypatch.setattr("src.review_actions.append_to_drafts", _append)
+    account = ImapAccountRef(
+        host="imap.gmail.com",
+        user="me@gmail.com",
+        drafts_folder="[Gmail]/Drafts",
+    )
+    persist_approved(_processed("hi"), "hi", tmp_path, "imap", account)
+    assert len(calls) == 1
+    assert calls[0][1] == "[Gmail]/Drafts"
+
+
+def test_persist_imap_blocks_a_different_active_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("IMAP_HOST", "imap.gmail.com")
+    monkeypatch.setenv("IMAP_USER", "other@gmail.com")
+    account = ImapAccountRef(
+        host="imap.gmail.com",
+        user="original@gmail.com",
+        drafts_folder="[Gmail]/Drafts",
+    )
+    with pytest.raises(ImapAccountMismatchError):
+        persist_approved(_processed("hi"), "hi", tmp_path, "imap", account)
+    assert not list(tmp_path.glob("*.txt"))
 
 
 def test_persist_eml_and_txt_share_stem(tmp_path: Path) -> None:
     out = tmp_path / "approved"
-    txt = persist_approved(_processed("hi", email_id="<m@h>"), "hi", out, "mbox:x").txt_path
+    txt = persist_approved(
+        _processed("hi", email_id="<m@h>"), "hi", out, "mbox:x"
+    ).txt_path
     eml = next(out.glob("*.eml"))
     assert eml.stem == txt.stem
+
+
+def test_start_imap_captures_account_routing_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.cli import _cmd_start_imap
+
+    email = _email(email_id="<imap@host>")
+    monkeypatch.setattr("src.cli.load_imap_unread", lambda days: [email])
+    monkeypatch.setenv("IMAP_HOST", "imap.gmail.com")
+    monkeypatch.setenv("IMAP_USER", "me@gmail.com")
+    monkeypatch.setenv("IMAP_DRAFTS_FOLDER", "[Gmail]/Drafts")
+    captured: dict[str, Any] = {}
+
+    def _fake_run(
+        emails: list[Email],
+        sources: dict[str, str],
+        args: argparse.Namespace,
+        queue_dir: Path,
+        imap_accounts: dict[str, ImapAccountRef] | None,
+    ) -> int:
+        captured.update(
+            emails=emails,
+            sources=sources,
+            queue_dir=queue_dir,
+            imap_accounts=imap_accounts,
+        )
+        return 0
+
+    monkeypatch.setattr("src.cli._run_start_pipeline", _fake_run)
+    rc = _cmd_start_imap(
+        argparse.Namespace(queue_dir=str(tmp_path), days=14, limit=None)
+    )
+    assert rc == 0
+    assert captured["sources"] == {email.id: "imap"}
+    account = captured["imap_accounts"][email.id]
+    assert account == ImapAccountRef(
+        host="imap.gmail.com",
+        user="me@gmail.com",
+        drafts_folder="[Gmail]/Drafts",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +496,9 @@ def test_session_record_shape_is_json_serializable() -> None:
         claude_client=_EchoClaude(),
         task="reply",
     )
-    rec = session_record(p, action="approve", saved_path=Path("data/approved_drafts/x.txt"))
+    rec = session_record(
+        p, action="approve", saved_path=Path("data/approved_drafts/x.txt")
+    )
     # Round-trips through JSON (the log is JSONL).
     loaded = json.loads(json.dumps(rec))
     assert loaded["email_id"] == "<abc@host>"
@@ -433,8 +587,9 @@ def test_reset_deletes_both_ledgers(tmp_path: Path) -> None:
         reviewed_path,
     )
 
-    append_records(tmp_path, [_queue_record()])
-    append_reviewed(tmp_path, "<abc@host>", "approve", None)
+    record = _queue_record()
+    append_records(tmp_path, [record])
+    append_reviewed(tmp_path, record.record_id, "<abc@host>", "approve", None)
     assert processed_path(tmp_path).exists() and reviewed_path(tmp_path).exists()
 
     rc = main(["reset", "--queue-dir", str(tmp_path), "--yes"])
@@ -551,7 +706,9 @@ def test_worker_routes_rehydrate_warning_into_notes(
     class _StrayPlaceholderClaude:
         model = "fake-claude"
 
-        def delegate(self, anonymized_email: str, anonymized_thread: Any, task: str) -> str:
+        def delegate(
+            self, anonymized_email: str, anonymized_thread: Any, task: str
+        ) -> str:
             return "Will do — looping in Ghost_P9."
 
     monkeypatch.setattr("src.cli.triage", lambda email, client: _result())

@@ -1,6 +1,6 @@
 // IMAP settings view. Fields match the existing env contract exactly
-// (IMAP_HOST / IMAP_USER / IMAP_PASS / IMAP_FOLDER — no port field, the
-// loader uses IMAP4_SSL defaults). The password is write-only: the API
+// (IMAP_HOST / IMAP_USER / IMAP_PASS / IMAP_FOLDER / IMAP_DRAFTS_FOLDER —
+// no port field, the loader uses IMAP4_SSL defaults). The password is write-only: the API
 // reports "set"/"unset" and this form only ever sends a new value the user
 // typed; leaving it blank keeps the saved one.
 import { useEffect, useState } from 'react'
@@ -9,11 +9,21 @@ import { fetchImapSettings, saveImapSettings, testImapSettings } from './api'
 import type { MdSelectElement, MdTextFieldElement } from './declarations'
 
 const PROVIDERS = [
-  { id: 'gmail', label: 'Gmail', host: 'imap.gmail.com' },
-  { id: 'outlook', label: 'Outlook / Office 365', host: 'outlook.office365.com' },
-  { id: 'icloud', label: 'iCloud Mail', host: 'imap.mail.me.com' },
-  { id: 'yahoo', label: 'Yahoo Mail', host: 'imap.mail.yahoo.com' },
-  { id: 'custom', label: 'Custom…', host: '' },
+  {
+    id: 'gmail',
+    label: 'Gmail',
+    host: 'imap.gmail.com',
+    draftsFolder: '[Gmail]/Drafts',
+  },
+  {
+    id: 'outlook',
+    label: 'Outlook / Office 365',
+    host: 'outlook.office365.com',
+    draftsFolder: 'Drafts',
+  },
+  { id: 'icloud', label: 'iCloud Mail', host: 'imap.mail.me.com', draftsFolder: 'Drafts' },
+  { id: 'yahoo', label: 'Yahoo Mail', host: 'imap.mail.yahoo.com', draftsFolder: 'Draft' },
+  { id: 'custom', label: 'Custom…', host: '', draftsFolder: 'Drafts' },
 ] as const
 
 type ProviderId = (typeof PROVIDERS)[number]['id']
@@ -31,15 +41,19 @@ interface Status {
 
 interface Props {
   showToast: (message: string) => void
+  processing: boolean
+  onStartImap: (days: number) => Promise<void>
 }
 
-export default function SettingsView({ showToast }: Props) {
+export default function SettingsView({ showToast, processing, onStartImap }: Props) {
   const [loaded, setLoaded] = useState(false)
   const [provider, setProvider] = useState<ProviderId>('gmail')
   const [host, setHost] = useState('imap.gmail.com')
   const [user, setUser] = useState('')
   const [password, setPassword] = useState('')
   const [folder, setFolder] = useState('INBOX')
+  const [draftsFolder, setDraftsFolder] = useState('[Gmail]/Drafts')
+  const [days, setDays] = useState('7')
   const [passwordSaved, setPasswordSaved] = useState<'set' | 'unset'>('unset')
   const [status, setStatus] = useState<Status>({ kind: 'idle', message: '' })
 
@@ -48,11 +62,17 @@ export default function SettingsView({ showToast }: Props) {
     fetchImapSettings()
       .then((s) => {
         if (cancelled) return
-        const p = providerForHost(s.host)
+        const resolvedHost = s.host || 'imap.gmail.com'
+        const p = providerForHost(resolvedHost)
+        const defaults = PROVIDERS.find((candidate) => candidate.id === p)
+        const resolvedDrafts = s.host
+          ? s.drafts_folder || defaults?.draftsFolder || 'Drafts'
+          : '[Gmail]/Drafts'
         setProvider(p)
-        setHost(s.host || 'imap.gmail.com')
+        setHost(resolvedHost)
         setUser(s.user)
         setFolder(s.folder || 'INBOX')
+        setDraftsFolder(resolvedDrafts)
         setPasswordSaved(s.password)
         setLoaded(true)
       })
@@ -69,14 +89,21 @@ export default function SettingsView({ showToast }: Props) {
     }
   }, [])
 
-  const form = { host: host.trim(), user: user.trim(), password, folder: folder.trim() }
-  const busy = status.kind === 'busy'
+  const form = {
+    host: host.trim(),
+    user: user.trim(),
+    password,
+    folder: folder.trim(),
+    drafts_folder: draftsFolder.trim(),
+  }
+  const busy = status.kind === 'busy' || processing
 
   const handleProvider = (id: string) => {
     const p = PROVIDERS.find((x) => x.id === id)
     if (!p) return
     setProvider(p.id)
-    if (p.id !== 'custom') setHost(p.host)
+    setHost(p.host)
+    setDraftsFolder(p.draftsFolder)
   }
 
   const handleTest = async () => {
@@ -103,7 +130,29 @@ export default function SettingsView({ showToast }: Props) {
       setPasswordSaved(resp.password)
       setPassword('')
       setStatus({ kind: 'ok', message: 'saved to .env (file mode 0600)' })
-      showToast('IMAP settings saved to .env — run `python -m src.cli start-imap` to fetch mail')
+      showToast('IMAP settings saved to .env')
+    } catch (err) {
+      setStatus({
+        kind: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  const handleSaveAndProcess = async () => {
+    const parsedDays = Number(days)
+    if (!Number.isInteger(parsedDays) || parsedDays < 1 || parsedDays > 365) {
+      setStatus({ kind: 'error', message: 'Days to fetch must be from 1 to 365.' })
+      return
+    }
+    setStatus({ kind: 'busy', message: 'saving settings…' })
+    try {
+      const resp = await saveImapSettings(form)
+      setPasswordSaved(resp.password)
+      setPassword('')
+      setStatus({ kind: 'busy', message: 'starting the mail pipeline…' })
+      await onStartImap(parsedDays)
+      setStatus({ kind: 'ok', message: 'processing started; progress appears above' })
     } catch (err) {
       setStatus({
         kind: 'error',
@@ -164,11 +213,30 @@ export default function SettingsView({ showToast }: Props) {
           onInput={(e) => setPassword((e.currentTarget as MdTextFieldElement).value)}
         />
         <md-outlined-text-field
-          label="Folder"
+          label="Inbox folder"
           value={folder}
           disabled={!loaded || busy}
           supporting-text="mailbox to read (default INBOX)"
           onInput={(e) => setFolder((e.currentTarget as MdTextFieldElement).value)}
+        />
+        <md-outlined-text-field
+          label="Drafts folder"
+          value={draftsFolder}
+          disabled={!loaded || busy}
+          supporting-text="where approved replies are saved (never sent)"
+          onInput={(e) =>
+            setDraftsFolder((e.currentTarget as MdTextFieldElement).value)
+          }
+        />
+        <md-outlined-text-field
+          label="Days to fetch"
+          type="number"
+          value={days}
+          min="1"
+          max="365"
+          disabled={!loaded || busy}
+          supporting-text="unread mail from the last 7 days by default"
+          onInput={(e) => setDays((e.currentTarget as MdTextFieldElement).value)}
         />
 
         <div className="settings-actions">
@@ -177,6 +245,13 @@ export default function SettingsView({ showToast }: Props) {
           </md-outlined-button>
           <md-filled-button type="button" disabled={!loaded || busy} onClick={handleSave}>
             Save
+          </md-filled-button>
+          <md-filled-button
+            type="button"
+            disabled={!loaded || busy}
+            onClick={handleSaveAndProcess}
+          >
+            Save &amp; process mail
           </md-filled-button>
         </div>
 

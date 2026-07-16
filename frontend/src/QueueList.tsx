@@ -14,8 +14,8 @@ import {
 
 interface Props {
   records: QueueRecordDTO[]
-  selectedId: string | null
-  onSelect: (emailId: string) => void
+  selectedId: string | null // a record_id, not a Message-ID
+  onSelect: (recordId: string) => void
 }
 
 export default function QueueList({ records, selectedId, onSelect }: Props) {
@@ -28,11 +28,11 @@ export default function QueueList({ records, selectedId, onSelect }: Props) {
       <md-list className="queue-list">
         {records.map((r, i) => (
           <md-list-item
-            key={r.email.id}
+            key={r.record_id}
             type="button"
-            className={r.email.id === selectedId ? 'queue-row selected' : 'queue-row'}
-            aria-current={r.email.id === selectedId ? 'true' : undefined}
-            onClick={() => onSelect(r.email.id)}
+            className={r.record_id === selectedId ? 'queue-row selected' : 'queue-row'}
+            aria-current={r.record_id === selectedId ? 'true' : undefined}
+            onClick={() => onSelect(r.record_id)}
           >
             <div slot="headline" className="row-head">
               <span className="row-index">{i + 1}</span>
