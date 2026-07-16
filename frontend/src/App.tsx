@@ -576,12 +576,11 @@ function OptionsDialog({
                 <h4 className="md-typescale-title-medium">Reset</h4>
                 <p>
                   Reset the review queue so the next processing run treats every
-                  email as new — including everything already reviewed.
+                  email as new, including everything already reviewed.
                 </p>
                 <div className="reset-warning">
                   This permanently deletes the processed and reviewed ledgers.
-                  Approved drafts and session logs are not touched, matching the
-                  terminal <code>reset</code> command.
+                  Approved drafts and session logs are not touched.
                 </div>
                 <div className="modal-actions">
                   <md-outlined-button type="button" disabled={resetting} onClick={onClose}>
