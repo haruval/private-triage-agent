@@ -147,6 +147,13 @@ export function saveImapSettings(
   return post<{ ok: boolean; password: 'set' | 'unset' }>('/api/settings/imap', form)
 }
 
+export function resetImapSettings(): Promise<{
+  ok: boolean
+  password: 'unset'
+}> {
+  return post<{ ok: boolean; password: 'unset' }>('/api/settings/imap/reset', {})
+}
+
 export function testImapSettings(form: ImapSettingsForm): Promise<ImapTestResponse> {
   return post<ImapTestResponse>('/api/settings/imap/test', form)
 }

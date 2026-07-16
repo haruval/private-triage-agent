@@ -1,7 +1,6 @@
-// The single-page review app: a top bar with the two leading actions
-// (Upload .mbox, Connect IMAP), the review queue as the main view, and the
-// IMAP settings as a simple state-switched second view (no router). The
-// queue polls /api/queue every 15s; approving/rejecting advances to the
+// The single-page review app: a top bar with the leading actions, the review
+// queue as the main view, and processing/IMAP settings in an Options dialog.
+// The queue polls /api/queue every 15s; approving/rejecting advances to the
 // next pending record, exactly like the terminal `review` loop. Records are
 // keyed by the opaque record_id — the same Message-ID can be pending once
 // per IMAP account, so email.id is display-only.
@@ -17,6 +16,7 @@ import type {
 } from './api'
 import {
   DEFAULT_PROCESSING_OPTIONS,
+  fetchImapSettings,
   fetchProcessingStatus,
   fetchQueue,
   importMbox,
@@ -33,10 +33,9 @@ const POLL_MS = 15_000
 const PROCESS_POLL_MS = 2_000
 const MAX_PROCESS_LIMIT = 10_000
 
-type View = 'queue' | 'settings'
+type OptionsSection = 'imap' | 'advanced' | 'reset'
 
 export default function App() {
-  const [view, setView] = useState<View>('queue')
   const [records, setRecords] = useState<QueueRecordDTO[] | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [edits, setEdits] = useState<Record<string, string>>({})
@@ -45,6 +44,8 @@ export default function App() {
   const [processing, setProcessing] = useState<ProcessingStatus | null>(null)
   const [options, setOptions] = useState<ProcessingOptions>(DEFAULT_PROCESSING_OPTIONS)
   const [optionsOpen, setOptionsOpen] = useState(false)
+  const [optionsSection, setOptionsSection] = useState<OptionsSection>('advanced')
+  const [imapUsernameFilled, setImapUsernameFilled] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [apiError, setApiError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
@@ -57,6 +58,10 @@ export default function App() {
     setToast(message)
     window.clearTimeout(toastTimer.current)
     toastTimer.current = window.setTimeout(() => setToast(null), 7000)
+  }, [])
+
+  const handleImapUsernameChange = useCallback((username: string) => {
+    setImapUsernameFilled(username.trim() !== '')
   }, [])
 
   const refresh = useCallback(async () => {
@@ -74,6 +79,21 @@ export default function App() {
     const id = window.setInterval(() => void refresh(), POLL_MS)
     return () => window.clearInterval(id)
   }, [refresh])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchImapSettings()
+      .then((settings) => {
+        if (!cancelled) setImapUsernameFilled(settings.user.trim() !== '')
+      })
+      .catch(() => {
+        // The queue request reports API connectivity errors; this optional
+        // visual hint can remain in its unconfigured state when unavailable.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -210,7 +230,7 @@ export default function App() {
   const handleStartImap = useCallback(
     async (days: number) => {
       await beginProcessing('imap', days)
-      setView('queue')
+      setOptionsOpen(false)
     },
     [beginProcessing],
   )
@@ -254,47 +274,41 @@ export default function App() {
         >
           {uploading ? 'Selecting…' : 'Upload .mbox'}
         </md-filled-tonal-button>
-        {view === 'queue' ? (
-          <md-filled-tonal-button
-            type="button"
-            className="topbar-action flat-tonal-action"
-            disabled={isProcessing}
-            onClick={() => setView('settings')}
-          >
-            Connect IMAP
-          </md-filled-tonal-button>
-        ) : (
-          <md-filled-tonal-button
-            type="button"
-            className="topbar-action"
-            onClick={() => setView('queue')}
-          >
-            ← Back to queue
-          </md-filled-tonal-button>
-        )}
+        <md-filled-tonal-button
+          type="button"
+          className={`topbar-action flat-tonal-action ${
+            imapUsernameFilled ? 'imap-configured' : ''
+          }`}
+          disabled={isProcessing}
+          onClick={() => {
+            setOptionsSection('imap')
+            setOptionsOpen(true)
+          }}
+        >
+          Connect IMAP
+        </md-filled-tonal-button>
         <md-filled-tonal-button
           type="button"
           className="topbar-action flat-tonal-action"
           disabled={isProcessing}
-          onClick={() => setOptionsOpen(true)}
+          onClick={() => {
+            setOptionsSection('advanced')
+            setOptionsOpen(true)
+          }}
         >
           {optionsCustomized ? 'Options *' : 'Options'}
         </md-filled-tonal-button>
         <span className="spacer" />
-        {view === 'queue' && (
-          <>
-            {records !== null && (
-              <span className="dim pending-count">{list.length} pending</span>
-            )}
-            <md-filled-tonal-button
-              type="button"
-              className="topbar-action flat-tonal-action"
-              onClick={() => void refresh()}
-            >
-              Refresh
-            </md-filled-tonal-button>
-          </>
+        {records !== null && (
+          <span className="dim pending-count">{list.length} pending</span>
         )}
+        <md-filled-tonal-button
+          type="button"
+          className="topbar-action flat-tonal-action"
+          onClick={() => void refresh()}
+        >
+          Refresh
+        </md-filled-tonal-button>
       </header>
 
       {isProcessing && processing && (
@@ -307,23 +321,17 @@ export default function App() {
 
       {apiError && (
         <div className="api-error" role="alert">
-          API unreachable ({apiError}) — is the backend running? Start it with
+          API unreachable ({apiError}) - is the backend running? Start it with
           <code> make api</code>.
         </div>
       )}
 
-      {view === 'settings' ? (
-        <SettingsView
-          showToast={showToast}
-          processing={isProcessing}
-          onStartImap={handleStartImap}
-        />
-      ) : records === null ? (
+      {records === null ? (
         <div className="empty-state dim">Loading queue…</div>
       ) : list.length === 0 ? (
         <div className="empty-state">
           <p className="md-typescale-title-medium">
-            Nothing to review — the queue is empty.
+            Nothing to review, the queue is empty.
           </p>
           <p className="dim">
             Upload an .mbox file or connect IMAP to fetch and process new mail.
@@ -358,6 +366,7 @@ export default function App() {
       {optionsOpen && (
         <OptionsDialog
           options={options}
+          initialSection={optionsSection}
           onSave={(next) => {
             setOptions(next)
             setOptionsOpen(false)
@@ -365,6 +374,9 @@ export default function App() {
           }}
           onClose={() => setOptionsOpen(false)}
           onReset={handleReset}
+          showToast={showToast}
+          onStartImap={handleStartImap}
+          onImapUsernameChange={handleImapUsernameChange}
           processing={isProcessing}
           resetting={resetting}
         />
@@ -379,9 +391,9 @@ export default function App() {
   )
 }
 
-// Options groups the advanced start/start-imap flags and the destructive queue
-// reset into separate sidebar sections. Field edits are local until Save, so
-// closing the popup is always a true no-op. Router/eval flags stay terminal-only.
+// Options groups IMAP connection settings, advanced start/start-imap flags,
+// and the destructive queue reset into separate sidebar sections. Advanced
+// field edits are local until Save. Router/eval flags stay terminal-only.
 const ANONYMIZERS: { id: Anonymizer; label: string; hint: string }[] = [
   { id: 'regex', label: 'regex', hint: 'fixed-shape PII only (fastest)' },
   { id: 'combined', label: 'combined', hint: 'regex + NER (default)' },
@@ -390,20 +402,28 @@ const ANONYMIZERS: { id: Anonymizer; label: string; hint: string }[] = [
 
 function OptionsDialog({
   options,
+  initialSection,
   onSave,
   onClose,
   onReset,
+  showToast,
+  onStartImap,
+  onImapUsernameChange,
   processing,
   resetting,
 }: {
   options: ProcessingOptions
+  initialSection: OptionsSection
   onSave: (next: ProcessingOptions) => void
   onClose: () => void
   onReset: () => Promise<void>
+  showToast: (message: string) => void
+  onStartImap: (days: number) => Promise<void>
+  onImapUsernameChange: (username: string) => void
   processing: boolean
   resetting: boolean
 }) {
-  const [section, setSection] = useState<'advanced' | 'reset'>('advanced')
+  const [section, setSection] = useState<OptionsSection>(initialSection)
   const [limitText, setLimitText] = useState(
     options.limit === null ? '' : String(options.limit),
   )
@@ -441,9 +461,25 @@ function OptionsDialog({
           <h3 id="options-dialog-title" className="md-typescale-title-medium">
             Options
           </h3>
+          <button
+            type="button"
+            className="options-close-button"
+            aria-label="Close options"
+            onClick={onClose}
+          >
+            ×
+          </button>
         </header>
         <div className="options-layout">
           <nav className="options-sidebar" aria-label="Options sections">
+            <button
+              type="button"
+              className={`options-nav-button ${section === 'imap' ? 'active' : ''}`}
+              aria-current={section === 'imap' ? 'page' : undefined}
+              onClick={() => setSection('imap')}
+            >
+              Connect IMAP
+            </button>
             <button
               type="button"
               className={`options-nav-button ${section === 'advanced' ? 'active' : ''}`}
@@ -463,7 +499,15 @@ function OptionsDialog({
           </nav>
 
           <section className="options-content">
-            {section === 'advanced' ? (
+            {section === 'imap' ? (
+              <SettingsView
+                showToast={showToast}
+                processing={processing}
+                onStartImap={onStartImap}
+                onUsernameChange={onImapUsernameChange}
+                embedded
+              />
+            ) : section === 'advanced' ? (
               <>
                 <h4 className="md-typescale-title-medium">Advanced</h4>
                 <p className="dim">

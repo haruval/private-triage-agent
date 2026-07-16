@@ -165,7 +165,10 @@ def test_append_to_drafts_uses_draft_flag_and_folder() -> None:
     assert message == b"raw message bytes"
 
 
-def test_append_to_drafts_defaults_folder_and_never_reads_or_sends() -> None:
+def test_append_to_drafts_defaults_folder_and_never_reads_or_sends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("IMAP_DRAFTS_FOLDER", raising=False)
     fake = _FakeIMAP({})
     append_to_drafts(b"x", client=fake)
     methods = {c[0] for c in fake.calls}
