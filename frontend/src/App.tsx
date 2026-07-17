@@ -155,7 +155,7 @@ export default function App() {
         const resp = await postReview(record.record_id, action, draft)
         const parts: string[] = []
         if (action === 'reject') {
-          parts.push('rejected — nothing saved')
+          parts.push('rejected - nothing saved')
         } else {
           parts.push(`saved → ${resp.saved_path ?? '?'}`)
         }
