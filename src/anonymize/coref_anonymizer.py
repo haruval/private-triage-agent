@@ -86,16 +86,13 @@ class CorefAnonymizer:
     def _build_replacements(
         self, text: str
     ) -> tuple[list[_Replacement], dict[str, str]]:
-        base_dets = self._base.detect(text)
-        _, base_map = self._base.anonymize(text)
-        value_to_placeholder = {v: k for k, v in base_map.items()}
-
-        base_reps: list[_Replacement] = []
-        for d in base_dets:
-            ph = value_to_placeholder.get(d.value)
-            if ph is None:
-                continue
-            base_reps.append(_Replacement(d.start, d.end, ph, d.value, "base"))
+        # The base plan already carries original-text spans and the exact
+        # placeholder per span, so this stays offset-faithful to what the
+        # base anonymizer would substitute.
+        plan, base_map = self._base.replacements(text)
+        base_reps = [
+            _Replacement(r.start, r.end, r.placeholder, r.value, "base") for r in plan
+        ]
 
         # Coref runs on the ORIGINAL text — pronouns and their antecedents
         # must both be visible.
