@@ -14,8 +14,9 @@ draft, then **re-hydrated** locally. Nothing is sent automatically: every draft
 is reviewed by you first. 
 
 Under the hood, it runs three sequential layers, each covering a failure mode the
-others structurally miss. The default (`combined`) runs all three; you can
-select a single layer with `--anonymizer`.
+others structurally miss. The default (`combined`) runs all three; `--anonymizer`
+selects a smaller stack (`regex+ner` for the first two layers, `regex` for the
+first alone).
 
 - **Deterministic regex** for fixed-shape PII: emails, phone numbers, dollar
   amounts, dates. Fast and exact, but can't work on anything without a predictable
@@ -29,12 +30,13 @@ select a single layer with `--anonymizer`.
   links every pronoun back to the entity it refers to. Coref predicts mention
   clusters, every span that points to the same entity, returned as character
   offsets, so "Sarah," "she," and "her" come back as one chain. Each pronoun
-  then inherits its placeholder from that cluster and the model finds the mention
-  in the chain that overlaps an entity NER already tagged (`Sarah → Alex_P1`)
-  and rewrites every other mention in the chain to the same `Alex_P1`. This
-  offset-based linking lets a bare "she" three sentences later resolve
-  to the correct person rather than just being a generic redaction. Pronouns aren't named
-  entities, so NER can't touch them; only the coref chain can.
+  gets a grammatical placeholder linked by suffix to the entity NER already
+  tagged (`Sarah → Alex_P1`, `she → They_P1`, `her → Their_P1`). Claude can
+  see that all three refer to entity `P1`, while local re-hydration restores
+  each original form exactly. This offset-based linking lets a bare "she"
+  three sentences later resolve to the correct person rather than just being
+  a generic redaction. Pronouns aren't named entities, so NER can't touch them;
+  only the coref chain can.
   `scripts/eval_pronoun_leak.py` measures how many such leaks slip through with
   and without this layer. (`en_coreference_web_trf`, spaCy's own experimental
   coref, doesn't work on Apple Silicon rn, which is why fastcoref is used
@@ -140,7 +142,7 @@ ollama pull gemma3:27b    # about 17 GB
 Run the project installation once from the repository root:
 
 ```sh
-make install              # create venv, install requirements, install the spaCy model
+make install              # create venv and install/cache the local models
 cd frontend && npm install
 cd ..
 ```
@@ -149,9 +151,28 @@ cd ..
 executable isn't on your PATH, point it at your interpreter, e.g.
 `make install PYTHON_BIN=python3` (must be Python 3.12+).
 
-The package-age check rejects PyPI pins younger than 14 days. After reviewing
-the pins, bypass it deliberately with
+The package-age check rejects locked dependencies younger than 14 days. It
+checks PyPI upload times and the official GitHub release-asset creation time
+for the hashed `en_core_web_trf` wheel, and fails closed if metadata is
+unavailable or a lockfile entry cannot be verified. After reviewing the
+dependency, bypass it deliberately with
 `ALLOW_RECENT_PACKAGES=1 make install`.
+
+The install also downloads about 365 MB for `biu-nlp/f-coref`. Its immutable
+commit, official commit time, required files, and SHA-256 hashes are locked in
+`configs/coref_model.lock.json`. Setup applies the same `MIN_AGE_DAYS` window
+to that model revision; after deliberate review, only the model check can be
+bypassed with `ALLOW_RECENT_MODELS=1`.
+
+Setup uses the shared Hugging Face cache only as a download source, then copies
+exactly the locked files into an isolated runtime directory under `venv/`.
+The runtime copy contains no symlinks or unlisted files and is hash-checked
+before every load, so Transformers cannot select an alternate checkpoint.
+Processing uses only that copy and an in-memory spaCy tokenizer: it never
+contacts Hugging Face or downloads another spaCy model while handling mail.
+If the runtime copy is removed, restore it with
+`venv/bin/python scripts/cache_coref_model.py`. `make clean` removes the runtime
+copy; the shared download cache may remain so the next install can reuse it.
 
 Claude escalation and ranking need `ANTHROPIC_API_KEY`. To enable them:
 
@@ -483,7 +504,7 @@ python -m src.cli process-old data/dev_corpus.mbox --limit 10
 # Present + log only, no approve/reject prompts (good for a quick look or CI)
 python -m src.cli process data/dev_corpus.mbox --limit 3 --no-input
 
-# Pick the anonymizer used for escalations (default: combined = regex + NER)
+# Pick the anonymizer used for escalations (default: combined = regex + NER + coref)
 python -m src.cli process data/dev_corpus.mbox --limit 5 --anonymizer regex
 
 # Reproducible random sample
@@ -514,13 +535,13 @@ python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle --seed 
 
 ### preview anonymizer
 
-Shows exactly what would leave the box on escalation; `--anonymizer` picks the
-layer:
+Shows exactly what would leave the box on escalation; `--anonymizer` picks how
+much of the stack runs:
 
 ```sh
 python -m src.cli anonymize-emails data/dev_corpus.mbox --limit 2
 python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer regex --limit 2
-python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer coref --shuffle --seed 42
+python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer regex+ner --shuffle --seed 42
 ```
 
 ### Run the test suite

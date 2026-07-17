@@ -51,6 +51,10 @@ ordinary names:
     Phone_F1    a phone number    Amount_M1   a dollar amount
     Date_D1     a date            Address_A1  a street address
 
+Coreference placeholders share an entity suffix. For example, ``Alex_P1``,
+``They_P1``, and ``Their_P1`` all refer to the same entity while preserving
+the grammatical role of the pronoun.
+
 Treat each placeholder as the real entity it stands for. Critical rules:
 
 - Preserve every placeholder EXACTLY as written — same prefix, underscore,

@@ -396,8 +396,8 @@ export default function App() {
 // field edits are local until Save. Router/eval flags stay terminal-only.
 const ANONYMIZERS: { id: Anonymizer; label: string; hint: string }[] = [
   { id: 'regex', label: 'regex', hint: 'fixed-shape PII only (fastest)' },
-  { id: 'combined', label: 'combined', hint: 'regex + NER (default)' },
-  { id: 'coref', label: 'coref', hint: 'regex + NER + coreference (slowest)' },
+  { id: 'regex+ner', label: 'regex + NER', hint: 'adds named entities (no coreference)' },
+  { id: 'combined', label: 'combined', hint: 'regex + NER + coreference (default)' },
 ]
 
 function OptionsDialog({

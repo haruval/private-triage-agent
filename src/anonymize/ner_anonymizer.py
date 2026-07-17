@@ -19,11 +19,10 @@ re-tagged (or worse, partially re-tagged) by the NER pass.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
-from src.anonymize.regex_anonymizer import Detection, RegexAnonymizer
+from src.anonymize.regex_anonymizer import _PATTERNS, Detection, RegexAnonymizer
 
 # spaCy entity label -> (type_name, placeholder_prefix, placeholder_letter)
 _NER_LABELS: dict[str, tuple[str, str, str]] = {
@@ -35,7 +34,22 @@ _NER_LABELS: dict[str, tuple[str, str, str]] = {
     "FAC":    ("facility", "Beacon",   "K"),
 }
 
+# type_name -> (placeholder_prefix, placeholder_letter), per detection layer.
+_NER_TYPE_META = {t: (prefix, letter) for t, prefix, letter in _NER_LABELS.values()}
+_REGEX_TYPE_META = {t: (prefix, letter) for t, prefix, letter, _ in _PATTERNS}
+
 DEFAULT_MODEL = "en_core_web_trf"
+
+
+@dataclass(frozen=True)
+class Replacement:
+    """One planned substitution, anchored to offsets in the original text."""
+
+    start: int
+    end: int
+    type: str
+    placeholder: str
+    value: str
 
 
 @dataclass(frozen=True)
@@ -61,40 +75,14 @@ def _resolve_overlaps(hits: list[_RawHit]) -> list[_RawHit]:
     return sorted(chosen, key=lambda h: h.start)
 
 
-_PLACEHOLDER_SUFFIX_RE = re.compile(r"_([A-Z])(\d+)$")
-
-
-def _counts_from_mapping(mapping: dict[str, str]) -> dict[str, int]:
-    """Highest placeholder number already used per letter.
-
-    Lets a second pass continue numbering (``Date_D2``, ``Date_D3``, …)
-    instead of restarting at 1 and colliding with the first pass's keys.
-    """
-    counts: dict[str, int] = {}
-    for placeholder in mapping:
-        m = _PLACEHOLDER_SUFFIX_RE.search(placeholder)
-        if not m:
-            continue
-        letter, num = m.group(1), int(m.group(2))
-        counts[letter] = max(counts.get(letter, 0), num)
-    return counts
-
-
 def _apply_placeholders(
     text: str,
     hits: list[_RawHit],
-    *,
-    start_counters: dict[str, int] | None = None,
 ) -> tuple[str, dict[str, str]]:
-    """Assign sequential placeholders per letter and substitute right-to-left.
-
-    ``start_counters`` seeds the per-letter counters so a second pass picks up
-    where an earlier one left off (used by :class:`CombinedAnonymizer` to keep
-    NER placeholders from colliding with regex ones on shared letters).
-    """
+    """Assign sequential placeholders per letter and substitute right-to-left."""
     mapping: dict[str, str] = {}
     value_to_placeholder: dict[str, str] = {}
-    counters: dict[str, int] = dict(start_counters) if start_counters else {}
+    counters: dict[str, int] = {}
     for h in hits:
         if h.value in value_to_placeholder:
             continue
@@ -108,6 +96,32 @@ def _apply_placeholders(
         placeholder = value_to_placeholder[h.value]
         out = out[: h.start] + placeholder + out[h.end :]
     return out, mapping
+
+
+def _map_to_original(
+    pos: int,
+    segments: list[tuple[int, int, int, int]],
+    *,
+    is_end: bool,
+) -> int:
+    """Translate a regex-cleaned-text offset back to the original text.
+
+    ``segments`` are the regex substitutions as
+    ``(clean_start, clean_end, orig_start, orig_end)`` in document order.
+    An offset that falls inside a placeholder snaps outward — to the
+    original span's start for span starts, its end for span ends — so a hit
+    covering part of a placeholder always covers the whole original value.
+    """
+    shift = 0  # cleaned position minus original position, before each segment
+    for c_start, c_end, o_start, o_end in segments:
+        before = pos <= c_start if is_end else pos < c_start
+        if before:
+            return pos - shift
+        inside = pos <= c_end if is_end else pos < c_end
+        if inside:
+            return o_end if is_end else o_start
+        shift = c_end - o_end
+    return pos - shift
 
 
 # ---------------------------------------------------------------------------
@@ -147,11 +161,9 @@ class NERAnonymizer:
         hits = self._scan(text)
         return [Detection(h.start, h.end, h.type, h.value) for h in hits]
 
-    def anonymize(
-        self, text: str, *, start_counters: dict[str, int] | None = None
-    ) -> tuple[str, dict[str, str]]:
+    def anonymize(self, text: str) -> tuple[str, dict[str, str]]:
         hits = self._scan(text)
-        return _apply_placeholders(text, hits, start_counters=start_counters)
+        return _apply_placeholders(text, hits)
 
     # --- internals --------------------------------------------------------
 
@@ -200,51 +212,70 @@ class CombinedAnonymizer:
 
     # --- public API -------------------------------------------------------
 
-    def anonymize(self, text: str) -> tuple[str, dict[str, str]]:
-        regex_out, regex_map = self._regex.anonymize(text)
+    def replacements(self, text: str) -> tuple[list[Replacement], dict[str, str]]:
+        """The authoritative substitution plan, anchored to the original text.
 
-        # Regex placeholders use letters E/F/U/M/D/A/C/S; NER uses P/O/G/M/D/K.
-        # The shared letters M (money) and D (date) DO collide: a regex
-        # ``Date_D1`` and an NER ``Date_D1`` would be the same key, and the
-        # merge below would silently drop one mapping. Seed the NER pass with
-        # the regex pass's per-letter counts so it continues numbering
-        # (``Date_D2``, …) and every placeholder stays globally unique.
-        ner_out, ner_map = self._ner.anonymize(
-            regex_out, start_counters=_counts_from_mapping(regex_map)
-        )
+        Regex hits keep their true spans. NER hits are found on the
+        regex-cleaned text and translated back by *offset* through the regex
+        substitutions — never re-searched by value, which anchored repeated
+        values to the wrong occurrence. An NER span that swallows a regex
+        placeholder widens to the placeholder's full original value, and the
+        longer span wins the overlap, so nested values stay covered.
 
-        merged = {**regex_map, **ner_map}
-        return ner_out, merged
-
-    def detect(self, text: str) -> list[Detection]:
-        """Detections with offsets in the *original* text.
-
-        Regex detections come back with original offsets directly. NER
-        detections are produced on the regex-anonymized text, so each is
-        re-anchored to the first matching uncovered occurrence of its value
-        in the original.
+        ``anonymize()``, ``detect()``, and the coref layer all consume this
+        one plan; the returned mapping holds exactly the placeholders the
+        plan applies, each keyed to its original-text value.
         """
         regex_dets = self._regex.detect(text)
         regex_out, regex_map = self._regex.anonymize(text)
-        ner_dets_anon = self._ner.detect(regex_out)
+        placeholder_for_value = {v: k for k, v in regex_map.items()}
 
-        # Defensive: drop any NER hit that landed on a regex placeholder.
-        placeholders = set(regex_map.keys())
-        ner_dets_anon = [d for d in ner_dets_anon if d.value not in placeholders]
+        # Regex substitutions as (clean_start, clean_end, orig_start, orig_end).
+        segments: list[tuple[int, int, int, int]] = []
+        shift = 0
+        for d in regex_dets:
+            ph_len = len(placeholder_for_value[d.value])
+            c_start = d.start + shift
+            segments.append((c_start, c_start + ph_len, d.start, d.end))
+            shift += ph_len - (d.end - d.start)
 
-        regex_spans = [(d.start, d.end) for d in regex_dets]
-        mapped: list[Detection] = []
-        for d in ner_dets_anon:
-            claimed = regex_spans + [(m.start, m.end) for m in mapped]
-            cursor = 0
-            while True:
-                idx = text.find(d.value, cursor)
-                if idx < 0:
-                    break
-                s, e = idx, idx + len(d.value)
-                if not any(s < ce and cs < e for cs, ce in claimed):
-                    mapped.append(Detection(s, e, d.type, d.value))
-                    break
-                cursor = idx + 1
+        # Regex hits first: on equal spans the stable sort in
+        # _resolve_overlaps keeps them over the NER re-tag of a placeholder.
+        hits: list[_RawHit] = []
+        for d in regex_dets:
+            prefix, letter = _REGEX_TYPE_META[d.type]
+            hits.append(_RawHit(d.start, d.end, d.type, prefix, letter, d.value))
+        for d in self._ner.detect(regex_out):
+            s = _map_to_original(d.start, segments, is_end=False)
+            e = _map_to_original(d.end, segments, is_end=True)
+            value = text[s:e]
+            if not value.strip():
+                continue
+            prefix, letter = _NER_TYPE_META[d.type]
+            hits.append(_RawHit(s, e, d.type, prefix, letter, value))
 
-        return sorted(regex_dets + mapped, key=lambda d: d.start)
+        mapping: dict[str, str] = {}
+        value_to_placeholder: dict[str, str] = {}
+        counters: dict[str, int] = {}
+        plan: list[Replacement] = []
+        for h in _resolve_overlaps(hits):
+            placeholder = value_to_placeholder.get(h.value)
+            if placeholder is None:
+                counters[h.letter] = counters.get(h.letter, 0) + 1
+                placeholder = f"{h.prefix}_{h.letter}{counters[h.letter]}"
+                value_to_placeholder[h.value] = placeholder
+                mapping[placeholder] = h.value
+            plan.append(Replacement(h.start, h.end, h.type, placeholder, h.value))
+        return plan, mapping
+
+    def anonymize(self, text: str) -> tuple[str, dict[str, str]]:
+        plan, mapping = self.replacements(text)
+        out = text
+        for r in sorted(plan, key=lambda r: r.start, reverse=True):
+            out = out[: r.start] + r.placeholder + out[r.end :]
+        return out, mapping
+
+    def detect(self, text: str) -> list[Detection]:
+        """Non-overlapping detections with offsets in the *original* text."""
+        plan, _ = self.replacements(text)
+        return [Detection(r.start, r.end, r.type, r.value) for r in plan]
