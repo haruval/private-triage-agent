@@ -25,6 +25,7 @@ import pytest
 
 from src import review_queue
 from src.api.server import (
+    ProcessRequest,
     ServerConfig,
     create_server,
     default_drafts_folder,
@@ -741,6 +742,14 @@ def test_process_request_validation(api: Api) -> None:
         status, resp, _ = api.post("/api/process", body)
         assert status == 400, body
         assert "error" in resp
+
+
+@pytest.mark.parametrize("anonymizer", ["regex", "regex+ner", "combined"])
+def test_process_request_accepts_every_anonymizer(anonymizer: str) -> None:
+    request = ProcessRequest.from_json_dict(
+        {"source": "mbox", "anonymizer": anonymizer}
+    )
+    assert request.anonymizer == anonymizer
 
 
 def test_process_defaults_match_the_cli(

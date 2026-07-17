@@ -16,10 +16,20 @@ the default ``combined`` path.
 from __future__ import annotations
 
 import re
+import hashlib
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
-from src.anonymize.coref_anonymizer import CorefAnonymizer
+from src.anonymize.coref_anonymizer import (
+    CorefAnonymizer,
+    CorefModelLock,
+    _build_coref,
+    _resolve_coref_model,
+    _verify_coref_model_age,
+    load_coref_model_lock,
+)
 from src.anonymize.ner_anonymizer import CombinedAnonymizer, NERAnonymizer
 from src.anonymize.regex_anonymizer import Detection, RegexAnonymizer
 from src.anonymize.rehydrate import rehydrate
@@ -111,17 +121,224 @@ def test_ner_span_containing_regex_placeholder_stays_covered() -> None:
     assert rehydrate(out, mapping) == text
 
 
-def test_pronoun_inherits_entity_placeholder() -> None:
+def test_pronoun_uses_linked_placeholder_and_round_trips() -> None:
     text = "Ann wrote the draft. She filed it."
     anon = _coref_over([(r"\bAnn\b", "person")], clusters=[[(0, 3), (21, 24)]])
 
     out, mapping = anon.anonymize(text)
 
-    assert out == "Alex_P1 wrote the draft. Alex_P1 filed it."
-    assert mapping == {"Alex_P1": "Ann"}
+    assert out == "Alex_P1 wrote the draft. They_P1 filed it."
+    assert mapping == {"Alex_P1": "Ann", "They_P1": "She"}
+    assert rehydrate(out, mapping) == text
 
     detections = {(d.type, d.value) for d in anon.detect(text)}
     assert ("pronoun", "She") in detections
+
+
+def test_possessive_and_reflexive_pronouns_preserve_grammar() -> None:
+    text = "Ann filed her report herself."
+    anon = _coref_over(
+        [(r"\bAnn\b", "person")],
+        clusters=[[(0, 3), (10, 13), (21, 28)]],
+    )
+
+    out, mapping = anon.anonymize(text)
+
+    assert out == "Alex_P1 filed Their_P1 report Themself_P1."
+    assert mapping == {
+        "Alex_P1": "Ann",
+        "Their_P1": "her",
+        "Themself_P1": "herself",
+    }
+    assert rehydrate(out, mapping) == text
+
+
+def test_same_entity_pronoun_variants_get_distinct_linked_placeholders() -> None:
+    text = "Ann said she agreed. She signed."
+    anon = _coref_over(
+        [(r"\bAnn\b", "person")],
+        clusters=[[(0, 3), (9, 12), (21, 24)]],
+    )
+
+    out, mapping = anon.anonymize(text)
+
+    assert out == "Alex_P1 said They_P1 agreed. Theya_P1 signed."
+    assert mapping == {
+        "Alex_P1": "Ann",
+        "They_P1": "she",
+        "Theya_P1": "She",
+    }
+    assert rehydrate(out, mapping) == text
+
+
+def _lock_for_file(path: Path, *, committed_at: datetime | None = None) -> CorefModelLock:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return CorefModelLock(
+        repo_id="biu-nlp/f-coref",
+        revision="a" * 40,
+        committed_at=committed_at or datetime(2022, 1, 1, tzinfo=timezone.utc),
+        files=((path.name, digest),),
+    )
+
+
+def test_resolve_coref_model_uses_pinned_local_snapshot(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    config = snapshot / "config.json"
+    config.write_text("{}")
+    model_lock = _lock_for_file(config)
+    calls: list[dict[str, object]] = []
+
+    def _download(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return str(snapshot)
+
+    resolved = _resolve_coref_model(
+        model_lock, local_files_only=True, downloader=_download
+    )
+
+    assert resolved == snapshot
+    assert calls == [{
+        "repo_id": "biu-nlp/f-coref",
+        "revision": "a" * 40,
+        "allow_patterns": ["config.json"],
+        "local_files_only": True,
+    }]
+
+
+def test_resolve_coref_model_rejects_modified_file(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    config = snapshot / "config.json"
+    config.write_text("expected")
+    model_lock = _lock_for_file(config)
+    config.write_text("modified")
+
+    with pytest.raises(RuntimeError, match="integrity check failed"):
+        _resolve_coref_model(
+            model_lock,
+            local_files_only=True,
+            downloader=lambda **kwargs: str(snapshot),
+        )
+
+
+def test_missing_local_coref_model_has_actionable_error() -> None:
+    def _missing(**kwargs: object) -> str:
+        raise OSError("not cached")
+
+    model_lock = CorefModelLock(
+        repo_id="biu-nlp/f-coref",
+        revision="a" * 40,
+        committed_at=datetime(2022, 1, 1, tzinfo=timezone.utc),
+        files=(("config.json", "0" * 64),),
+    )
+    with pytest.raises(RuntimeError, match=r"scripts/cache_coref_model\.py"):
+        _resolve_coref_model(
+            model_lock, local_files_only=True, downloader=_missing
+        )
+
+
+def test_build_coref_uses_blank_spacy_language(tmp_path: Path) -> None:
+    language = object()
+    calls: list[dict[str, object]] = []
+
+    def _blank(name: str) -> object:
+        assert name == "en"
+        return language
+
+    def _factory(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return "coref"
+
+    built = _build_coref(
+        tmp_path,
+        coref_factory=_factory,
+        blank_factory=_blank,
+    )
+
+    assert built == "coref"
+    assert calls == [{"model_name_or_path": str(tmp_path), "nlp": language}]
+
+
+def test_coref_model_age_uses_official_commit_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ALLOW_RECENT_MODELS", raising=False)
+    model_lock = CorefModelLock(
+        repo_id="biu-nlp/f-coref",
+        revision="a" * 40,
+        committed_at=datetime(2022, 1, 1, tzinfo=timezone.utc),
+        files=(("config.json", "0" * 64),),
+    )
+
+    _verify_coref_model_age(
+        model_lock,
+        commit_time_lookup=lambda repo_id, revision: datetime(
+            2022, 1, 1, tzinfo=timezone.utc
+        ),
+        now=datetime(2022, 2, 1, tzinfo=timezone.utc),
+    )
+
+
+def test_coref_model_age_rejects_recent_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ALLOW_RECENT_MODELS", raising=False)
+    committed_at = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    model_lock = CorefModelLock(
+        repo_id="biu-nlp/f-coref",
+        revision="a" * 40,
+        committed_at=committed_at,
+        files=(("config.json", "0" * 64),),
+    )
+
+    with pytest.raises(RuntimeError, match="ALLOW_RECENT_MODELS=1"):
+        _verify_coref_model_age(
+            model_lock,
+            commit_time_lookup=lambda repo_id, revision: committed_at,
+            now=datetime(2026, 7, 16, tzinfo=timezone.utc),
+        )
+
+
+def test_coref_model_age_override_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ALLOW_RECENT_MODELS", "1")
+    model_lock = CorefModelLock(
+        repo_id="biu-nlp/f-coref",
+        revision="a" * 40,
+        committed_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
+        files=(("config.json", "0" * 64),),
+    )
+
+    def _unexpected_lookup(repo_id: str, revision: str) -> datetime:
+        raise AssertionError("override should skip the remote age lookup")
+
+    _verify_coref_model_age(
+        model_lock,
+        commit_time_lookup=_unexpected_lookup,
+        now=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+
+
+def test_coref_model_lock_rejects_mutable_revision() -> None:
+    with pytest.raises(ValueError, match="full commit SHA"):
+        CorefModelLock.from_json_dict(
+            {
+                "repo_id": "biu-nlp/f-coref",
+                "revision": "main",
+                "committed_at": "2022-11-28T11:35:52+00:00",
+                "reviewed_at": "2026-07-16",
+                "files": {"config.json": "0" * 64},
+            }
+        )
+
+
+def test_checked_in_coref_model_lock_is_valid() -> None:
+    model_lock = load_coref_model_lock()
+    assert model_lock.repo_id == "biu-nlp/f-coref"
+    assert len(model_lock.revision) == 40
+    assert "pytorch_model.bin" in dict(model_lock.files)
 
 
 # ---------------------------------------------------------------------------

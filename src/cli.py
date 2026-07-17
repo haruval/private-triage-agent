@@ -272,7 +272,9 @@ CLAUDE_SYSTEM_PROMPT = (
     "dates, and other PII have been replaced with proper-noun-shaped "
     "placeholders such as Alex_P1, Acme_O1, Phone_F1, Date_D1. Preserve "
     "every placeholder verbatim in your response — do not invent new "
-    "placeholders, do not paraphrase them, do not strip their suffixes."
+    "placeholders, do not paraphrase them, do not strip their suffixes. "
+    "Linked pronoun placeholders share an entity suffix: Alex_P1, They_P1, "
+    "and Their_P1 all refer to the same entity."
 )
 DEFAULT_PREVIEW_TASK = (
     "Draft a concise reply to the email below. Reply in plain text only."

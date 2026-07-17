@@ -19,6 +19,8 @@ install:
 		$(PIP) install -r requirements.txt; \
 		$(PYTHON) -m spacy download en_core_web_trf; \
 	fi
+	@echo "Caching pinned coreference model (~365 MB; reused across venvs)"
+	$(PYTHON) scripts/cache_coref_model.py
 
 lock:
 	$(PIP) install --upgrade -r requirements.txt

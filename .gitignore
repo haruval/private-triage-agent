@@ -9,5 +9,6 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 frontend/.dev-token
+.claude/
 /CLAUDE.md
 /AGENTS.md
