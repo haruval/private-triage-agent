@@ -746,3 +746,33 @@ def test_worker_notes_claude_init_failure_once(
     for it in (first, second):
         assert it.processed.provenance == "local"
         assert it.processed.error and "no Claude client" in it.processed.error
+
+
+def test_build_anonymizer_option_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pins the option-name → class wiring: the default 'combined' must build
+    the coref-backed anonymizer (all three layers) and 'regex+ner' the
+    two-layer one. The option names deliberately don't mirror the class
+    names, so a swapped branch would silently drop the coreference layer."""
+    import src.anonymize.coref_anonymizer as coref_module
+    import src.cli as cli
+
+    class _Regex: ...
+
+    class _RegexNer: ...
+
+    class _Coref: ...
+
+    monkeypatch.setattr(cli, "RegexAnonymizer", _Regex)
+    monkeypatch.setattr(cli, "CombinedAnonymizer", _RegexNer)
+    monkeypatch.setattr(coref_module, "CorefAnonymizer", _Coref)
+
+    for name, expected_cls, expected_label in (
+        ("regex", _Regex, "regex"),
+        ("regex+ner", _RegexNer, "regex+ner"),
+        ("combined", _Coref, "regex+ner+coref"),
+    ):
+        anonymizer, label = cli._build_anonymizer(name)
+        assert (type(anonymizer), label) == (expected_cls, expected_label)
+
+    with pytest.raises(ValueError):
+        cli._build_anonymizer("coref")  # the pre-rename option name is retired

@@ -155,7 +155,7 @@ export default function App() {
         const resp = await postReview(record.record_id, action, draft)
         const parts: string[] = []
         if (action === 'reject') {
-          parts.push('rejected — nothing saved')
+          parts.push('rejected - nothing saved')
         } else {
           parts.push(`saved → ${resp.saved_path ?? '?'}`)
         }
@@ -396,8 +396,8 @@ export default function App() {
 // field edits are local until Save. Router/eval flags stay terminal-only.
 const ANONYMIZERS: { id: Anonymizer; label: string; hint: string }[] = [
   { id: 'regex', label: 'regex', hint: 'fixed-shape PII only (fastest)' },
-  { id: 'combined', label: 'combined', hint: 'regex + NER (default)' },
-  { id: 'coref', label: 'coref', hint: 'regex + NER + coreference (slowest)' },
+  { id: 'regex+ner', label: 'regex + NER', hint: 'adds named entities (no coreference)' },
+  { id: 'combined', label: 'combined', hint: 'regex + NER + coreference (default)' },
 ]
 
 function OptionsDialog({
@@ -576,12 +576,11 @@ function OptionsDialog({
                 <h4 className="md-typescale-title-medium">Reset</h4>
                 <p>
                   Reset the review queue so the next processing run treats every
-                  email as new — including everything already reviewed.
+                  email as new, including everything already reviewed.
                 </p>
                 <div className="reset-warning">
                   This permanently deletes the processed and reviewed ledgers.
-                  Approved drafts and session logs are not touched, matching the
-                  terminal <code>reset</code> command.
+                  Approved drafts and session logs are not touched.
                 </div>
                 <div className="modal-actions">
                   <md-outlined-button type="button" disabled={resetting} onClick={onClose}>
