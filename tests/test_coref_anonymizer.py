@@ -15,8 +15,10 @@ the default ``combined`` path.
 
 from __future__ import annotations
 
-import re
 import hashlib
+import logging
+import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -345,7 +347,95 @@ def test_build_coref_uses_blank_spacy_language(tmp_path: Path) -> None:
     )
 
     assert built == "coref"
-    assert calls == [{"model_name_or_path": str(tmp_path), "nlp": language}]
+    assert calls == [{
+        "model_name_or_path": str(tmp_path),
+        "nlp": language,
+        "enable_progress_bar": False,
+    }]
+
+
+def test_coref_model_loading_is_deferred_and_cached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+    model_lock = object()
+    model_path = tmp_path / "model"
+    coref = _StubCoref()
+
+    def _load(path: Path) -> object:
+        calls.append(("lock", path))
+        return model_lock
+
+    def _resolve(lock: object, *, runtime_root: Path) -> Path:
+        assert lock is model_lock
+        calls.append(("resolve", runtime_root))
+        return model_path
+
+    def _build(path: Path) -> _StubCoref:
+        calls.append(("build", path))
+        return coref
+
+    monkeypatch.setattr(
+        "src.anonymize.coref_anonymizer.load_coref_model_lock", _load
+    )
+    monkeypatch.setattr(
+        "src.anonymize.coref_anonymizer._resolve_installed_coref_model", _resolve
+    )
+    monkeypatch.setattr("src.anonymize.coref_anonymizer._build_coref", _build)
+
+    base = CombinedAnonymizer(regex=RegexAnonymizer(), ner=_FakeNER([]))
+    lock_path = tmp_path / "model.lock.json"
+    runtime_root = tmp_path / "runtime"
+    anon = CorefAnonymizer(
+        base=base,
+        coref_lock_path=lock_path,
+        coref_runtime_root=runtime_root,
+    )
+
+    assert calls == []
+
+    anon.anonymize("No sensitive entity here.")
+    anon.detect("Still no sensitive entity here.")
+
+    assert calls == [
+        ("lock", lock_path),
+        ("resolve", runtime_root),
+        ("build", model_path),
+    ]
+
+
+def test_build_coref_disables_library_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import datasets
+
+    progress_calls: list[bool] = []
+    logger = logging.getLogger("fastcoref")
+    previous_level = logger.level
+    monkeypatch.setattr(
+        datasets, "disable_progress_bars", lambda: progress_calls.append(True)
+    )
+
+    def _noisy_factory(**kwargs: object) -> object:
+        logging.getLogger("fastcoref.modeling").info("fastcoref info")
+        if kwargs["enable_progress_bar"]:
+            print("fastcoref progress", file=sys.stderr)
+        return object()
+
+    try:
+        _build_coref(
+            tmp_path,
+            coref_factory=_noisy_factory,
+            blank_factory=lambda name: object(),
+        )
+        assert progress_calls == [True]
+        assert logger.level == logging.WARNING
+        assert capsys.readouterr().err == ""
+    finally:
+        logger.setLevel(previous_level)
 
 
 def test_coref_model_age_uses_official_commit_time(

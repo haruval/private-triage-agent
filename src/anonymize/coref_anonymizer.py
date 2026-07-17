@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -181,14 +183,10 @@ class CorefAnonymizer:
         coref_runtime_root: Path | str = DEFAULT_COREF_RUNTIME_ROOT,
     ) -> None:
         self._base = base if base is not None else CombinedAnonymizer()
-        if coref is not None:
-            self._coref = coref
-        else:
-            model_lock = load_coref_model_lock(coref_lock_path)
-            model_path = _resolve_installed_coref_model(
-                model_lock, runtime_root=coref_runtime_root
-            )
-            self._coref = _build_coref(model_path)
+        self._coref = coref
+        self._coref_lock_path = Path(coref_lock_path)
+        self._coref_runtime_root = Path(coref_runtime_root)
+        self._coref_init_lock = threading.Lock()
 
     # --- public API -------------------------------------------------------
 
@@ -223,7 +221,9 @@ class CorefAnonymizer:
 
         # Coref runs on the ORIGINAL text — pronouns and their antecedents
         # must both be visible.
-        clusters = self._coref.predict(texts=[text])[0].get_clusters(as_strings=False)
+        clusters = self._get_coref().predict(texts=[text])[0].get_clusters(
+            as_strings=False
+        )
 
         base_spans = [(r.start, r.end) for r in base_reps]
         coref_reps: list[_Replacement] = []
@@ -248,6 +248,22 @@ class CorefAnonymizer:
                 )
 
         return base_reps + coref_reps, mapping
+
+    def _get_coref(self) -> Any:
+        """Load and verify the coref model once, on its first actual use."""
+        coref = self._coref
+        if coref is not None:
+            return coref
+        with self._coref_init_lock:
+            coref = self._coref
+            if coref is None:
+                model_lock = load_coref_model_lock(self._coref_lock_path)
+                model_path = _resolve_installed_coref_model(
+                    model_lock, runtime_root=self._coref_runtime_root
+                )
+                coref = _build_coref(model_path)
+                self._coref = coref
+        return coref
 
 
 def _resolve_coref_model(
@@ -372,7 +388,11 @@ def _build_coref(
     coref_factory: Callable[..., Any] | None = None,
     blank_factory: Callable[[str], Any] | None = None,
 ) -> Any:
-    """Build fastcoref with an in-memory tokenizer and no model downloads."""
+    """Build fastcoref offline without writing library progress to stderr."""
+    from datasets import disable_progress_bars
+
+    disable_progress_bars()
+    logging.getLogger("fastcoref").setLevel(logging.WARNING)
     if coref_factory is None:
         from fastcoref import FCoref
 
@@ -384,6 +404,7 @@ def _build_coref(
     return coref_factory(
         model_name_or_path=str(model_path),
         nlp=blank_factory("en"),
+        enable_progress_bar=False,
     )
 
 
