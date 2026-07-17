@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Age-check and cache the pinned coref model for verified offline use."""
+"""Install an isolated, verified runtime copy of the pinned coref model."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from src.anonymize.coref_anonymizer import cache_coref_model
 
 def main() -> int:
     path = cache_coref_model()
-    print(f"Coreference model cached at {path}")
+    print(f"Coreference model runtime copy installed at {path}")
     return 0
 
 

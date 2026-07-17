@@ -21,6 +21,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -60,6 +63,9 @@ DEFAULT_COREF_LOCK_PATH = (
 )
 COREF_CACHE_COMMAND = "venv/bin/python scripts/cache_coref_model.py"
 DEFAULT_MIN_AGE_DAYS = 14
+DEFAULT_COREF_RUNTIME_ROOT = (
+    Path(sys.prefix) / "share" / "private-triage-agent" / "coref"
+)
 
 
 @dataclass(frozen=True)
@@ -172,13 +178,16 @@ class CorefAnonymizer:
         base: CombinedAnonymizer | None = None,
         coref: Any = None,
         coref_lock_path: Path | str = DEFAULT_COREF_LOCK_PATH,
+        coref_runtime_root: Path | str = DEFAULT_COREF_RUNTIME_ROOT,
     ) -> None:
         self._base = base if base is not None else CombinedAnonymizer()
         if coref is not None:
             self._coref = coref
         else:
             model_lock = load_coref_model_lock(coref_lock_path)
-            model_path = _resolve_coref_model(model_lock, local_files_only=True)
+            model_path = _resolve_installed_coref_model(
+                model_lock, runtime_root=coref_runtime_root
+            )
             self._coref = _build_coref(model_path)
 
     # --- public API -------------------------------------------------------
@@ -247,7 +256,7 @@ def _resolve_coref_model(
     local_files_only: bool,
     downloader: Any = None,
 ) -> Path:
-    """Resolve only the locked revision, then verify every required file."""
+    """Resolve only the locked download snapshot and verify required files."""
     if downloader is None:
         from huggingface_hub import snapshot_download
 
@@ -278,11 +287,83 @@ def _resolve_coref_model(
 
 def cache_coref_model(
     lock_path: Path | str = DEFAULT_COREF_LOCK_PATH,
+    *,
+    runtime_root: Path | str = DEFAULT_COREF_RUNTIME_ROOT,
 ) -> Path:
-    """Age-check, download, and hash-check the locked model during setup."""
+    """Install an age-checked, exact-file model copy for offline runtime use."""
     model_lock = load_coref_model_lock(lock_path)
     _verify_coref_model_age(model_lock)
-    return _resolve_coref_model(model_lock, local_files_only=False)
+    snapshot = _resolve_coref_model(model_lock, local_files_only=False)
+    return _materialize_coref_model(snapshot, model_lock, Path(runtime_root))
+
+
+def _resolve_installed_coref_model(
+    model_lock: CorefModelLock,
+    *,
+    runtime_root: Path | str = DEFAULT_COREF_RUNTIME_ROOT,
+) -> Path:
+    """Resolve the isolated runtime copy without consulting Hugging Face."""
+    model_path = Path(runtime_root) / model_lock.revision
+    try:
+        _verify_coref_model_files(model_path, model_lock, exact=True)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Coreference model runtime copy is missing or invalid at {model_path}. "
+            f"Run:\n  {COREF_CACHE_COMMAND}"
+        ) from exc
+    return model_path
+
+
+def _materialize_coref_model(
+    snapshot: Path,
+    model_lock: CorefModelLock,
+    runtime_root: Path,
+) -> Path:
+    """Atomically copy exactly the locked files out of the shared Hub cache."""
+    runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if runtime_root.is_symlink() or not runtime_root.is_dir():
+        raise RuntimeError(f"unsafe coref runtime root: {runtime_root}")
+
+    destination = runtime_root / model_lock.revision
+    if destination.exists() or destination.is_symlink():
+        try:
+            _verify_coref_model_files(destination, model_lock, exact=True)
+            _set_runtime_model_permissions(destination)
+            return destination
+        except RuntimeError:
+            if destination.is_symlink() or not destination.is_dir():
+                destination.unlink()
+            else:
+                shutil.rmtree(destination)
+
+    temp_path = Path(
+        tempfile.mkdtemp(prefix=f".{model_lock.revision}.", dir=runtime_root)
+    )
+    try:
+        for filename, _ in model_lock.files:
+            source = snapshot / filename
+            target = temp_path / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with source.open("rb") as source_file, target.open("xb") as target_file:
+                shutil.copyfileobj(source_file, target_file, length=1024 * 1024)
+                target_file.flush()
+                os.fsync(target_file.fileno())
+
+        _verify_coref_model_files(temp_path, model_lock, exact=True)
+        _set_runtime_model_permissions(temp_path)
+        os.replace(temp_path, destination)
+        _verify_coref_model_files(destination, model_lock, exact=True)
+        return destination
+    finally:
+        if temp_path.exists():
+            shutil.rmtree(temp_path)
+
+
+def _set_runtime_model_permissions(model_path: Path) -> None:
+    """Make files read-only while keeping directories owner-maintainable."""
+    for path in sorted(model_path.rglob("*"), reverse=True):
+        path.chmod(0o700 if path.is_dir() else 0o444)
+    model_path.chmod(0o700)
 
 
 def _build_coref(
@@ -309,8 +390,57 @@ def _build_coref(
 def _verify_coref_model_files(
     snapshot: Path,
     model_lock: CorefModelLock,
+    *,
+    exact: bool = False,
 ) -> None:
-    """Reject incomplete or modified model snapshots before loading them."""
+    """Reject incomplete or modified model files before loading them.
+
+    Download snapshots may contain unrelated Hub metadata. Runtime copies use
+    ``exact=True`` so no alternate checkpoint or tokenizer can influence what
+    Transformers loads.
+    """
+    if not snapshot.is_dir():
+        raise RuntimeError(
+            f"coref model integrity check failed: {snapshot} is not a directory"
+        )
+    if exact:
+        if snapshot.is_symlink():
+            raise RuntimeError(
+                "coref model integrity check failed: runtime directory is a symlink"
+            )
+        expected_files = {filename for filename, _ in model_lock.files}
+        expected_dirs = {
+            parent.as_posix()
+            for filename in expected_files
+            for parent in PurePosixPath(filename).parents
+            if parent != PurePosixPath(".")
+        }
+        actual_files: set[str] = set()
+        actual_dirs: set[str] = set()
+        for path in snapshot.rglob("*"):
+            relative = path.relative_to(snapshot).as_posix()
+            if path.is_symlink():
+                raise RuntimeError(
+                    f"coref model integrity check failed: symlink {relative!r}"
+                )
+            if path.is_file():
+                actual_files.add(relative)
+            elif path.is_dir():
+                actual_dirs.add(relative)
+            else:
+                raise RuntimeError(
+                    f"coref model integrity check failed: special file {relative!r}"
+                )
+        if actual_files != expected_files or actual_dirs != expected_dirs:
+            missing = sorted(expected_files - actual_files)
+            unexpected = sorted(actual_files - expected_files)
+            unexpected_dirs = sorted(actual_dirs - expected_dirs)
+            raise RuntimeError(
+                "coref model integrity check failed: runtime file set differs "
+                f"(missing={missing}, unexpected={unexpected}, "
+                f"unexpected_dirs={unexpected_dirs})"
+            )
+
     for filename, expected in model_lock.files:
         path = snapshot / filename
         if not path.is_file():

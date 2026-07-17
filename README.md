@@ -151,8 +151,11 @@ cd ..
 executable isn't on your PATH, point it at your interpreter, e.g.
 `make install PYTHON_BIN=python3` (must be Python 3.12+).
 
-The package-age check rejects PyPI pins younger than 14 days. After reviewing
-the pins, bypass it deliberately with
+The package-age check rejects locked dependencies younger than 14 days. It
+checks PyPI upload times and the official GitHub release-asset creation time
+for the hashed `en_core_web_trf` wheel, and fails closed if metadata is
+unavailable or a lockfile entry cannot be verified. After reviewing the
+dependency, bypass it deliberately with
 `ALLOW_RECENT_PACKAGES=1 make install`.
 
 The install also downloads about 365 MB for `biu-nlp/f-coref`. Its immutable
@@ -161,11 +164,15 @@ commit, official commit time, required files, and SHA-256 hashes are locked in
 to that model revision; after deliberate review, only the model check can be
 bypassed with `ALLOW_RECENT_MODELS=1`.
 
-Processing resolves that exact local snapshot, verifies every required file,
-and uses an in-memory spaCy tokenizer, so it never contacts Hugging Face or
-downloads another spaCy model while handling mail. If the cache is removed,
-restore it with `venv/bin/python scripts/cache_coref_model.py`. The Hugging
-Face cache is shared outside `venv/`, so `make clean` does not remove it.
+Setup uses the shared Hugging Face cache only as a download source, then copies
+exactly the locked files into an isolated runtime directory under `venv/`.
+The runtime copy contains no symlinks or unlisted files and is hash-checked
+before every load, so Transformers cannot select an alternate checkpoint.
+Processing uses only that copy and an in-memory spaCy tokenizer: it never
+contacts Hugging Face or downloads another spaCy model while handling mail.
+If the runtime copy is removed, restore it with
+`venv/bin/python scripts/cache_coref_model.py`. `make clean` removes the runtime
+copy; the shared download cache may remain so the next install can reuse it.
 
 Claude escalation and ranking need `ANTHROPIC_API_KEY`. To enable them:
 

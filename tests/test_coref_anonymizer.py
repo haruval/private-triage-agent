@@ -26,8 +26,11 @@ from src.anonymize.coref_anonymizer import (
     CorefAnonymizer,
     CorefModelLock,
     _build_coref,
+    _materialize_coref_model,
     _resolve_coref_model,
+    _resolve_installed_coref_model,
     _verify_coref_model_age,
+    _verify_coref_model_files,
     load_coref_model_lock,
 )
 from src.anonymize.ner_anonymizer import CombinedAnonymizer, NERAnonymizer
@@ -220,6 +223,91 @@ def test_resolve_coref_model_rejects_modified_file(tmp_path: Path) -> None:
             local_files_only=True,
             downloader=lambda **kwargs: str(snapshot),
         )
+
+
+def test_materialized_runtime_copy_contains_only_locked_regular_files(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    config = snapshot / "config.json"
+    config.write_text("expected")
+    (snapshot / "model.safetensors").write_text("unlisted alternate weights")
+    model_lock = _lock_for_file(config)
+
+    installed = _materialize_coref_model(snapshot, model_lock, tmp_path / "runtime")
+
+    assert [path.name for path in installed.iterdir()] == ["config.json"]
+    assert not (installed / "config.json").is_symlink()
+    assert (installed / "config.json").read_text() == "expected"
+    assert _resolve_installed_coref_model(
+        model_lock, runtime_root=tmp_path / "runtime"
+    ) == installed
+
+
+def test_runtime_copy_rejects_unlisted_alternate_weights(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    installed = runtime_root / ("a" * 40)
+    installed.mkdir(parents=True)
+    config = installed / "config.json"
+    config.write_text("expected")
+    model_lock = _lock_for_file(config)
+    (installed / "model.safetensors").write_text("unverified")
+
+    with pytest.raises(RuntimeError, match="missing or invalid"):
+        _resolve_installed_coref_model(model_lock, runtime_root=runtime_root)
+
+
+def test_runtime_copy_rejects_unlisted_directory(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    installed = runtime_root / ("a" * 40)
+    installed.mkdir(parents=True)
+    config = installed / "config.json"
+    config.write_text("expected")
+    model_lock = _lock_for_file(config)
+    (installed / "unlisted").mkdir()
+
+    with pytest.raises(RuntimeError, match="unexpected_dirs"):
+        _verify_coref_model_files(installed, model_lock, exact=True)
+
+
+def test_runtime_copy_rejects_symlinked_file(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    installed = runtime_root / ("a" * 40)
+    installed.mkdir(parents=True)
+    source = tmp_path / "source.json"
+    source.write_text("expected")
+    linked = installed / "config.json"
+    linked.symlink_to(source)
+    model_lock = _lock_for_file(source)
+
+    with pytest.raises(RuntimeError, match="symlink"):
+        _verify_coref_model_files(installed, model_lock, exact=True)
+
+
+def test_interrupted_materialization_leaves_no_runtime_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    config = snapshot / "config.json"
+    config.write_text("expected")
+    model_lock = _lock_for_file(config)
+    runtime_root = tmp_path / "runtime"
+
+    def _interrupt(*args: object, **kwargs: object) -> None:
+        raise OSError("copy interrupted")
+
+    monkeypatch.setattr(
+        "src.anonymize.coref_anonymizer.shutil.copyfileobj", _interrupt
+    )
+
+    with pytest.raises(OSError, match="copy interrupted"):
+        _materialize_coref_model(snapshot, model_lock, runtime_root)
+
+    assert not (runtime_root / model_lock.revision).exists()
+    assert list(runtime_root.iterdir()) == []
 
 
 def test_missing_local_coref_model_has_actionable_error() -> None:
