@@ -394,9 +394,7 @@ def _build_coref(
     disable_progress_bars()
     logging.getLogger("fastcoref").setLevel(logging.WARNING)
     if coref_factory is None:
-        from fastcoref import FCoref
-
-        coref_factory = FCoref
+        coref_factory = _import_fcoref_factory()
     if blank_factory is None:
         import spacy
 
@@ -406,6 +404,18 @@ def _build_coref(
         nlp=blank_factory("en"),
         enable_progress_bar=False,
     )
+
+
+def _import_fcoref_factory() -> Callable[..., Any]:
+    """Import FCoref without letting the library configure root logging."""
+    root_logger = logging.getLogger()
+    import_guard = logging.NullHandler()
+    root_logger.addHandler(import_guard)
+    try:
+        from fastcoref import FCoref
+    finally:
+        root_logger.removeHandler(import_guard)
+    return FCoref
 
 
 def _verify_coref_model_files(

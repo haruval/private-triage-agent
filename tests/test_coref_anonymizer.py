@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -436,6 +437,32 @@ def test_build_coref_disables_library_progress(
         assert capsys.readouterr().err == ""
     finally:
         logger.setLevel(previous_level)
+
+
+def test_fastcoref_import_preserves_root_logging_in_clean_process() -> None:
+    """Regression: fastcoref calls basicConfig(INFO) on its first import."""
+    script = """
+import logging
+
+from src.anonymize.coref_anonymizer import _import_fcoref_factory
+
+root = logging.getLogger()
+level_before = root.level
+handlers_before = tuple(root.handlers)
+_import_fcoref_factory()
+assert root.level == level_before
+assert tuple(root.handlers) == handlers_before
+logging.getLogger("httpx").info("must stay silent")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
 
 
 def test_coref_model_age_uses_official_commit_time(
