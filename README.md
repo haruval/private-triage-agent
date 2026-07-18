@@ -220,7 +220,7 @@ JavaScript never sees it.
 ### 2. Add mail
 
 Click **Upload .mbox** to choose an exported mailbox. The app copies it into
-`data/inbox/` and starts processing new messages. Note: This currently only works on Mac, sorry!
+`data/inbox/` and starts processing new messages. Note: This currently only works on Mac, for other platforms you'll have to drag the file in yourself. Sorry!
 
 Or click **Connect IMAP**, enter an app-specific password, and choose **Save &
 process mail**. The form saves the `IMAP_*` values to `.env`, verifies the

@@ -206,10 +206,6 @@ code {
   flex: 1;
 }
 
-.pending-count {
-  margin-right: 4px;
-}
-
 .api-error {
   padding: 8px 16px;
   background: var(--md-sys-color-error-container);
