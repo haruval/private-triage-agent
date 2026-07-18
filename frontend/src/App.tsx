@@ -235,6 +235,16 @@ export default function App() {
     [beginProcessing],
   )
 
+  // Toolbar shortcut once IMAP is configured: fetch/process with the default
+  // window, no dialog. Errors surface as a toast since no form catches them.
+  const handleRefreshImap = useCallback(async () => {
+    try {
+      await beginProcessing('imap')
+    } catch (err) {
+      showToast(`error: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }, [beginProcessing, showToast])
+
   const handleReset = useCallback(async () => {
     setResetting(true)
     try {
@@ -281,11 +291,15 @@ export default function App() {
           }`}
           disabled={isProcessing}
           onClick={() => {
-            setOptionsSection('imap')
-            setOptionsOpen(true)
+            if (imapUsernameFilled) {
+              void handleRefreshImap()
+            } else {
+              setOptionsSection('imap')
+              setOptionsOpen(true)
+            }
           }}
         >
-          Connect IMAP
+          {imapUsernameFilled ? 'Refresh IMAP' : 'Connect IMAP'}
         </md-filled-tonal-button>
         <md-filled-tonal-button
           type="button"
@@ -297,14 +311,6 @@ export default function App() {
           }}
         >
           {optionsCustomized ? 'Options *' : 'Options'}
-        </md-filled-tonal-button>
-        <span className="spacer" />
-        <md-filled-tonal-button
-          type="button"
-          className="app-action-shape flat-tonal-action"
-          onClick={() => void refresh()}
-        >
-          Refresh
         </md-filled-tonal-button>
       </header>
 
