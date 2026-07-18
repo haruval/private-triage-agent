@@ -46,6 +46,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import islice
@@ -1207,6 +1208,11 @@ def _run_start_pipeline(
     """
     failed = 0
     done: list[_ProcessOutcome] = []
+    # Optional (done, total) hook so the web API can publish real progress;
+    # terminal runs have no attribute and rely on the Rich bar alone.
+    progress_cb: Callable[[int, int], None] | None = getattr(
+        args, "progress_cb", None
+    )
 
     if emails:
         try:
@@ -1247,6 +1253,9 @@ def _run_start_pipeline(
             TimeElapsedColumn(),
             console=console,
         )
+        if progress_cb is not None:
+            progress_cb(0, len(emails))
+        completed = 0
         with progress:
             task_id = progress.add_task("Processing…", total=len(emails))
             while True:
@@ -1270,6 +1279,9 @@ def _run_start_pipeline(
                 progress.update(
                     task_id, advance=1, description=f"[cyan]{subject_preview}"
                 )
+                completed += 1
+                if progress_cb is not None:
+                    progress_cb(completed, len(emails))
             progress.update(task_id, description="[green]processing done")
 
         if done:
@@ -1430,11 +1442,13 @@ def run_queued_pipeline(
     limit: int | None = None,
     anonymizer: str = "combined",
     task: str | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> int:
     """Run the queue-producing pipeline for the CLI or local web API.
 
     ``limit``, ``anonymizer``, and ``task`` mirror the ``start``/``start-imap``
     flags; callers (the web API) validate them before they get here.
+    ``progress`` is called with (emails done, total) as the batch advances.
     """
     if anonymizer not in ("regex", "regex+ner", "combined"):
         raise ValueError(f"unknown anonymizer: {anonymizer!r}")
@@ -1446,6 +1460,7 @@ def run_queued_pipeline(
         queue_dir=str(queue_dir),
         folder=str(inbox_dir),
         days=days,
+        progress_cb=progress,
     )
     if source == "mbox":
         return _cmd_start(args)

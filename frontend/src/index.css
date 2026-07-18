@@ -175,8 +175,10 @@ code {
   flex: none;
 }
 
+/* The title stays left; margin-right: auto pushes the action buttons to the
+   right edge of the topbar. */
 .app-title {
-  margin-right: 6px;
+  margin-right: auto;
   color: var(--md-sys-color-primary);
   font-weight: 650;
 }
@@ -215,6 +217,14 @@ code {
 .processing-banner md-linear-progress {
   width: 100%;
   --md-linear-progress-active-indicator-color: var(--md-sys-color-secondary);
+}
+
+/* Shown instead of the bar while the batch total is still unknown
+   (mbox scan / IMAP fetch); sized to fit the one-line banner. */
+.processing-banner md-circular-progress {
+  justify-self: start;
+  --md-circular-progress-size: 28px;
+  --md-circular-progress-active-indicator-color: var(--md-sys-color-secondary);
 }
 
 .main {

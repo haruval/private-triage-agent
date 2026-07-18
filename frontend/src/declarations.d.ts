@@ -35,6 +35,10 @@ declare module 'react' {
       'md-divider': MdProps
       'md-list': MdProps
       'md-list-item': MdProps<HTMLElement, { type?: 'text' | 'button' | 'link' }>
+      'md-circular-progress': MdProps<
+        HTMLElement,
+        { value?: number; max?: number; indeterminate?: boolean }
+      >
       'md-linear-progress': MdProps<
         HTMLElement,
         { value?: number; max?: number; indeterminate?: boolean }

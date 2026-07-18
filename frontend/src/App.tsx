@@ -254,7 +254,7 @@ export default function App() {
       setSelectedId(null)
       setEdits({})
       showToast(
-        `Queue reset — ${resp.processed_deleted} processed record(s) and ` +
+        `Queue reset: ${resp.processed_deleted} processed record(s) and ` +
           `${resp.reviewed_deleted} review decision(s) deleted; approved ` +
           'drafts and session logs are kept',
       )
@@ -315,8 +315,24 @@ export default function App() {
       {isProcessing && processing && (
         <div className="processing-banner" role="status">
           <span>{processing.message}</span>
-          <md-linear-progress indeterminate />
-          <span className="dim">Detailed progress is also visible in the API terminal.</span>
+          {processing.progress_total !== null && processing.progress_total > 0 ? (
+            <>
+              <md-linear-progress
+                value={(processing.progress_done ?? 0) / processing.progress_total}
+              />
+              <span className="dim">
+                {processing.progress_done ?? 0} of {processing.progress_total} email
+                {processing.progress_total === 1 ? '' : 's'} processed
+              </span>
+            </>
+          ) : (
+            <>
+              <md-circular-progress indeterminate />
+              <span className="dim">
+                Detailed progress is also visible in the API terminal.
+              </span>
+            </>
+          )}
         </div>
       )}
 
