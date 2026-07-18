@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""Convenience entry point for the local triage web application."""
+
+from src.launcher import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
