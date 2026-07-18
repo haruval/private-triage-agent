@@ -348,6 +348,10 @@ class ProcessingJob:
     finished_at: str | None = None
     message: str = "Processing mail…"
     exit_code: int | None = None
+    # (emails done, batch total), None until the per-email loop starts —
+    # scanning/IMAP fetch happens first and has no known total.
+    progress_done: int | None = None
+    progress_total: int | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -361,6 +365,8 @@ class ProcessingJob:
             "finished_at": self.finished_at,
             "message": self.message,
             "exit_code": self.exit_code,
+            "progress_done": self.progress_done,
+            "progress_total": self.progress_total,
         }
 
 
@@ -412,6 +418,12 @@ def _run_pipeline(config: ServerConfig, job: ProcessingJob) -> int:
     """Lazy CLI import keeps API startup light while sharing the real pipeline."""
     from src.cli import run_queued_pipeline
 
+    def _publish_progress(done: int, total: int) -> None:
+        # Plain int writes from the worker thread; total is set first so a
+        # concurrent status read never sees done without its total.
+        job.progress_total = total
+        job.progress_done = done
+
     return run_queued_pipeline(
         source=job.source,
         inbox_dir=config.inbox_dir,
@@ -420,6 +432,7 @@ def _run_pipeline(config: ServerConfig, job: ProcessingJob) -> int:
         limit=job.limit,
         anonymizer=job.anonymizer,
         task=job.task or None,
+        progress=_publish_progress,
     )
 
 
@@ -663,6 +676,8 @@ class TriageRequestHandler(BaseHTTPRequestHandler):
                     "finished_at": None,
                     "message": "No processing job has run yet.",
                     "exit_code": None,
+                    "progress_done": None,
+                    "progress_total": None,
                 }
             )
         self._send_json(200, payload)

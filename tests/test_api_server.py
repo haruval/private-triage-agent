@@ -769,6 +769,41 @@ def test_process_defaults_match_the_cli(
     assert (job.limit, job.anonymizer, job.task) == (None, "combined", "")
 
 
+def test_process_status_reports_email_progress(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pipeline's (done, total) callback shows up in /api/process/status."""
+    reported = threading.Event()
+    release = threading.Event()
+
+    def _fake_pipeline(*, progress: Any, **kwargs: Any) -> int:
+        progress(0, 3)
+        progress(2, 3)
+        reported.set()
+        assert release.wait(timeout=5)
+        progress(3, 3)
+        return 0
+
+    # Patch the CLI entry point (not _run_pipeline) so the real progress
+    # plumbing between the server and the pipeline is what gets exercised.
+    monkeypatch.setattr("src.cli.run_queued_pipeline", _fake_pipeline)
+
+    status, idle, _ = api.get("/api/process/status")
+    assert status == 200
+    assert (idle["progress_done"], idle["progress_total"]) == (None, None)
+
+    status, _, _ = api.post("/api/process", {"source": "mbox"})
+    assert status == 202
+    assert reported.wait(timeout=2)
+    status, job, _ = api.get("/api/process/status")
+    assert status == 200
+    assert (job["progress_done"], job["progress_total"]) == (2, 3)
+
+    release.set()
+    done = _wait_for_job(api, "succeeded")
+    assert (done["progress_done"], done["progress_total"]) == (3, 3)
+
+
 # ---------------------------------------------------------------------------
 # POST /api/reset — the web mirror of the CLI `reset` command
 # ---------------------------------------------------------------------------

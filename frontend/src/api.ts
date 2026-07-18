@@ -173,6 +173,9 @@ export interface ProcessingStatus {
   finished_at: string | null
   message: string
   exit_code: number | null
+  // null until the per-email loop starts (scanning/IMAP fetch has no total).
+  progress_done: number | null
+  progress_total: number | null
 }
 
 // Mirrors the start/start-imap CLI flags the API accepts; the server
