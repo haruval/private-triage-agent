@@ -68,6 +68,53 @@ def test_stop_process_signals_group_after_child_exit(
     assert (4242, launcher.signal.SIGKILL) not in sent
 
 
+def test_shutdown_ignores_signals_and_stops_web_then_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Once cleanup starts, further Ctrl-C / SIGTERM must not abort it, and
+    # both children must be stopped, web first.
+    web, api = Mock(name="web"), Mock(name="api")
+    ignored: list[int] = []
+    stopped: list[str] = []
+
+    def fake_signal(signum: int, handler: object) -> None:
+        assert handler is launcher.signal.SIG_IGN
+        ignored.append(signum)
+
+    monkeypatch.setattr(launcher.signal, "signal", fake_signal)
+    monkeypatch.setattr(
+        launcher,
+        "_stop_process",
+        lambda process: stopped.append("web" if process is web else "api"),
+    )
+
+    launcher._shutdown(web, api)
+
+    assert launcher.signal.SIGINT in ignored
+    assert launcher.signal.SIGTERM in ignored
+    assert stopped == ["web", "api"]
+
+
+def test_shutdown_stops_api_even_when_web_stop_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    web, api = Mock(name="web"), Mock(name="api")
+    stopped: list[object] = []
+
+    def fake_stop(process: object) -> None:
+        if process is web:
+            raise KeyboardInterrupt
+        stopped.append(process)
+
+    monkeypatch.setattr(launcher.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(launcher, "_stop_process", fake_stop)
+
+    with pytest.raises(KeyboardInterrupt):
+        launcher._shutdown(web, api)
+
+    assert stopped == [api]
+
+
 def test_install_signal_handlers_raises_system_exit() -> None:
     previous = launcher.signal.getsignal(launcher.signal.SIGTERM)
     try:
@@ -141,7 +188,7 @@ def test_main_starts_in_order_and_opens_browser(
         lambda url: events.append(f"browser:{url}") or True,
     )
     monkeypatch.setattr(launcher, "_supervise", lambda *_processes: 0)
-    monkeypatch.setattr(launcher, "_stop_process", lambda _process: None)
+    monkeypatch.setattr(launcher, "_shutdown", lambda *_processes: None)
 
     assert launcher.main([]) == 0
     assert events == [
@@ -164,7 +211,7 @@ def test_main_no_browser_skips_open(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(launcher, "_start", lambda *_args, **_kwargs: next(processes))
     monkeypatch.setattr(launcher, "_wait_until_ready", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(launcher, "_supervise", lambda *_args: 0)
-    monkeypatch.setattr(launcher, "_stop_process", lambda _process: None)
+    monkeypatch.setattr(launcher, "_shutdown", lambda *_args: None)
     monkeypatch.setattr(launcher.webbrowser, "open", opened)
 
     assert launcher.main(["--no-browser"]) == 0

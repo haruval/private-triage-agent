@@ -172,6 +172,26 @@ def _stop_process(process: subprocess.Popen[bytes] | None) -> None:
     process.wait()
 
 
+def _shutdown(
+    web_process: subprocess.Popen[bytes] | None,
+    api_process: subprocess.Popen[bytes] | None,
+) -> None:
+    """Stop both children even if further termination signals arrive.
+
+    A second Ctrl-C (or a SIGTERM/SIGHUP racing the cleanup) would otherwise
+    raise mid-cleanup, abort it, and strand whichever child had not been
+    stopped yet — leaving it holding its port for the next run to trip over.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        _stop_process(web_process)
+    finally:
+        _stop_process(api_process)
+
+
 def _supervise(
     api_process: subprocess.Popen[bytes], web_process: subprocess.Popen[bytes]
 ) -> int:
@@ -237,5 +257,4 @@ def main(argv: list[str] | None = None) -> int:
         print("\nStopping triage…")
         return 0
     finally:
-        _stop_process(web_process)
-        _stop_process(api_process)
+        _shutdown(web_process, api_process)
