@@ -299,12 +299,18 @@ export default function SettingsView({
             <div className="imap-reset-confirmation-actions">
               <md-outlined-button
                 type="button"
+                className="app-action-shape"
                 disabled={busy}
                 onClick={() => setConfirmingReset(false)}
               >
                 Cancel
               </md-outlined-button>
-              <md-filled-button type="button" disabled={busy} onClick={handleReset}>
+              <md-filled-button
+                type="button"
+                className="app-action-shape"
+                disabled={busy}
+                onClick={handleReset}
+              >
                 {busy ? 'Resetting…' : 'Reset IMAP'}
               </md-filled-button>
             </div>
@@ -313,19 +319,31 @@ export default function SettingsView({
           <div className="settings-actions">
             <md-outlined-button
               type="button"
+              className="app-action-shape"
               disabled={!loaded || busy}
               onClick={() => setConfirmingReset(true)}
             >
               Reset IMAP
             </md-outlined-button>
-            <md-outlined-button type="button" disabled={!loaded || busy} onClick={handleTest}>
+            <md-outlined-button
+              type="button"
+              className="app-action-shape"
+              disabled={!loaded || busy}
+              onClick={handleTest}
+            >
               Test connection
             </md-outlined-button>
-            <md-filled-button type="button" disabled={!loaded || busy} onClick={handleSave}>
+            <md-filled-button
+              type="button"
+              className="app-action-shape"
+              disabled={!loaded || busy}
+              onClick={handleSave}
+            >
               Save
             </md-filled-button>
             <md-filled-button
               type="button"
+              className="app-action-shape"
               disabled={!loaded || busy}
               onClick={handleSaveAndProcess}
             >

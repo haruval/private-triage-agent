@@ -181,9 +181,12 @@ code {
   font-weight: 650;
 }
 
-/* Pastel-green tonal actions, squared to the queue rows' 12px radius. */
-.topbar-action {
+/* Keep primary actions aligned with the queue rows' 12px corner radius. */
+.app-action-shape {
+  --md-filled-button-container-shape: 12px;
   --md-filled-tonal-button-container-shape: 12px;
+  --md-outlined-button-container-shape: 12px;
+  --md-text-button-container-shape: 12px;
 }
 
 /* Preserve the tonal hover tint without Material's hover elevation. */
@@ -562,16 +565,15 @@ code {
   font-size: 12px;
 }
 
-/* Reject uses the same green family as the tonal actions, but stays outlined. */
+/* Reject is visually distinct from Approve with the theme's pastel-purple pair. */
 .reject-action {
-  --md-outlined-button-label-text-color: var(--md-sys-color-on-secondary-container);
-  --md-outlined-button-focus-label-text-color: var(--md-sys-color-on-secondary-container);
-  --md-outlined-button-hover-label-text-color: var(--md-sys-color-on-secondary-container);
-  --md-outlined-button-pressed-label-text-color: var(--md-sys-color-on-secondary-container);
-  --md-outlined-button-outline-color: var(--md-sys-color-secondary);
-  --md-outlined-button-pressed-outline-color: var(--md-sys-color-secondary);
-  --md-outlined-button-hover-state-layer-color: var(--md-sys-color-secondary);
-  --md-outlined-button-pressed-state-layer-color: var(--md-sys-color-secondary);
+  --md-filled-tonal-button-container-color: var(--md-sys-color-tertiary-container);
+  --md-filled-tonal-button-label-text-color: var(--md-sys-color-on-tertiary-container);
+  --md-filled-tonal-button-focus-label-text-color: var(--md-sys-color-on-tertiary-container);
+  --md-filled-tonal-button-hover-label-text-color: var(--md-sys-color-on-tertiary-container);
+  --md-filled-tonal-button-pressed-label-text-color: var(--md-sys-color-on-tertiary-container);
+  --md-filled-tonal-button-hover-state-layer-color: var(--md-sys-color-on-tertiary-container);
+  --md-filled-tonal-button-pressed-state-layer-color: var(--md-sys-color-on-tertiary-container);
 }
 
 /* ---- settings ---------------------------------------------------------------- */
