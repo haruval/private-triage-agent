@@ -254,7 +254,7 @@ export default function App() {
       setSelectedId(null)
       setEdits({})
       showToast(
-        `Queue reset — ${resp.processed_deleted} processed record(s) and ` +
+        `Queue reset: ${resp.processed_deleted} processed record(s) and ` +
           `${resp.reviewed_deleted} review decision(s) deleted; approved ` +
           'drafts and session logs are kept',
       )
