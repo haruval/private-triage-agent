@@ -8,6 +8,7 @@ import type { QueueRecordDTO, ReviewAction } from './api'
 import {
   categoryClass,
   confidenceClass,
+  formatEmailDate,
   formatImportance,
   importanceClass,
   provenanceClass,
@@ -59,6 +60,12 @@ export default function RecordDetail({
           <span className="k">from</span>
           <span>{r.email.from_addr || '(unknown)'}</span>
         </div>
+        {formatEmailDate(r.email.date) && (
+          <div className="kv kv-tight">
+            <span className="k">sent</span>
+            <span>{formatEmailDate(r.email.date)}</span>
+          </div>
+        )}
         <div className="section-label">original message:</div>
         <pre className="original-body">{r.email.body_plain || '(empty body)'}</pre>
 

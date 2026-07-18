@@ -6,6 +6,7 @@ import type { QueueRecordDTO } from './api'
 import {
   categoryClass,
   collapseWhitespace,
+  formatEmailDate,
   formatImportance,
   importanceClass,
   provenanceClass,
@@ -44,6 +45,11 @@ export default function QueueList({ records, selectedId, onSelect }: Props) {
             <div slot="supporting-text" className="row-body">
               <div className="row-meta">
                 <span className="dim">from {r.email.from_addr || '(unknown)'}</span>
+                {formatEmailDate(r.email.date) && (
+                  <span className="dim">{formatEmailDate(r.email.date)}</span>
+                )}
+              </div>
+              <div className="row-meta">
                 <span className={`chip ${categoryClass(r.result.category)}`}>
                   {r.result.category}
                 </span>
