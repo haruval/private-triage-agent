@@ -286,9 +286,7 @@ export default function App() {
         </md-filled-tonal-button>
         <md-filled-tonal-button
           type="button"
-          className={`app-action-shape flat-tonal-action ${
-            imapUsernameFilled ? 'imap-configured' : ''
-          }`}
+          className="app-action-shape flat-tonal-action"
           disabled={isProcessing}
           onClick={() => {
             if (imapUsernameFilled) {

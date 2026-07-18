@@ -55,7 +55,7 @@ export default function RecordDetail({
           {r.email.subject || '(no subject)'}
         </h2>
 
-        <div className="kv">
+        <div className="kv kv-tight">
           <span className="k">from</span>
           <span>{r.email.from_addr || '(unknown)'}</span>
         </div>
