@@ -144,6 +144,7 @@ export default function SettingsView({
       const resp = await saveImapSettings(form)
       setPasswordSaved(resp.password)
       setPassword('')
+      onUsernameChange(form.user)
       setStatus({ kind: 'ok', message: 'saved to .env (file mode 0600)' })
       showToast('IMAP settings saved to .env')
     } catch (err) {
@@ -189,6 +190,7 @@ export default function SettingsView({
       const resp = await saveImapSettings(form)
       setPasswordSaved(resp.password)
       setPassword('')
+      onUsernameChange(form.user)
       setStatus({ kind: 'busy', message: 'starting the mail pipeline…' })
       await onStartImap(parsedDays)
       setStatus({ kind: 'ok', message: 'processing started; progress appears above' })
@@ -244,11 +246,7 @@ export default function SettingsView({
           label="Username (email address)"
           value={user}
           disabled={!loaded || busy}
-          onInput={(e) => {
-            const next = (e.currentTarget as MdTextFieldElement).value
-            setUser(next)
-            onUsernameChange(next)
-          }}
+          onInput={(e) => setUser((e.currentTarget as MdTextFieldElement).value)}
         />
         <md-outlined-text-field
           label="App password"
@@ -299,12 +297,18 @@ export default function SettingsView({
             <div className="imap-reset-confirmation-actions">
               <md-outlined-button
                 type="button"
+                className="app-action-shape"
                 disabled={busy}
                 onClick={() => setConfirmingReset(false)}
               >
                 Cancel
               </md-outlined-button>
-              <md-filled-button type="button" disabled={busy} onClick={handleReset}>
+              <md-filled-button
+                type="button"
+                className="app-action-shape"
+                disabled={busy}
+                onClick={handleReset}
+              >
                 {busy ? 'Resetting…' : 'Reset IMAP'}
               </md-filled-button>
             </div>
@@ -313,19 +317,31 @@ export default function SettingsView({
           <div className="settings-actions">
             <md-outlined-button
               type="button"
+              className="app-action-shape"
               disabled={!loaded || busy}
               onClick={() => setConfirmingReset(true)}
             >
               Reset IMAP
             </md-outlined-button>
-            <md-outlined-button type="button" disabled={!loaded || busy} onClick={handleTest}>
+            <md-outlined-button
+              type="button"
+              className="app-action-shape"
+              disabled={!loaded || busy}
+              onClick={handleTest}
+            >
               Test connection
             </md-outlined-button>
-            <md-filled-button type="button" disabled={!loaded || busy} onClick={handleSave}>
+            <md-filled-button
+              type="button"
+              className="app-action-shape"
+              disabled={!loaded || busy}
+              onClick={handleSave}
+            >
               Save
             </md-filled-button>
             <md-filled-button
               type="button"
+              className="app-action-shape"
               disabled={!loaded || busy}
               onClick={handleSaveAndProcess}
             >

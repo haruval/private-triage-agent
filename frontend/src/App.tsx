@@ -235,6 +235,16 @@ export default function App() {
     [beginProcessing],
   )
 
+  // Toolbar shortcut once IMAP is configured: fetch/process with the default
+  // window, no dialog. Errors surface as a toast since no form catches them.
+  const handleRefreshImap = useCallback(async () => {
+    try {
+      await beginProcessing('imap')
+    } catch (err) {
+      showToast(`error: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }, [beginProcessing, showToast])
+
   const handleReset = useCallback(async () => {
     setResetting(true)
     try {
@@ -268,7 +278,7 @@ export default function App() {
         <span className="app-title md-typescale-title-large">private triage agent</span>
         <md-filled-tonal-button
           type="button"
-          className="topbar-action flat-tonal-action"
+          className="app-action-shape flat-tonal-action"
           disabled={uploading || isProcessing}
           onClick={() => void handleUploadMbox()}
         >
@@ -276,20 +286,22 @@ export default function App() {
         </md-filled-tonal-button>
         <md-filled-tonal-button
           type="button"
-          className={`topbar-action flat-tonal-action ${
-            imapUsernameFilled ? 'imap-configured' : ''
-          }`}
-          disabled={isProcessing}
+          className="app-action-shape flat-tonal-action"
+          disabled={uploading || isProcessing}
           onClick={() => {
-            setOptionsSection('imap')
-            setOptionsOpen(true)
+            if (imapUsernameFilled) {
+              void handleRefreshImap()
+            } else {
+              setOptionsSection('imap')
+              setOptionsOpen(true)
+            }
           }}
         >
-          Connect IMAP
+          {imapUsernameFilled ? 'Refresh IMAP' : 'Connect IMAP'}
         </md-filled-tonal-button>
         <md-filled-tonal-button
           type="button"
-          className="topbar-action flat-tonal-action"
+          className="app-action-shape flat-tonal-action"
           disabled={isProcessing}
           onClick={() => {
             setOptionsSection('advanced')
@@ -297,14 +309,6 @@ export default function App() {
           }}
         >
           {optionsCustomized ? 'Options *' : 'Options'}
-        </md-filled-tonal-button>
-        <span className="spacer" />
-        <md-filled-tonal-button
-          type="button"
-          className="topbar-action flat-tonal-action"
-          onClick={() => void refresh()}
-        >
-          Refresh
         </md-filled-tonal-button>
       </header>
 
@@ -335,7 +339,7 @@ export default function App() {
           </p>
           <md-filled-tonal-button
             type="button"
-            className="topbar-action flat-tonal-action"
+            className="app-action-shape flat-tonal-action"
             onClick={() => void refresh()}
           >
             Refresh
@@ -564,10 +568,18 @@ function OptionsDialog({
                   </div>
                 )}
                 <div className="modal-actions">
-                  <md-outlined-button type="button" onClick={onClose}>
+                  <md-outlined-button
+                    type="button"
+                    className="app-action-shape"
+                    onClick={onClose}
+                  >
                     Cancel
                   </md-outlined-button>
-                  <md-filled-button type="button" onClick={handleSave}>
+                  <md-filled-button
+                    type="button"
+                    className="app-action-shape"
+                    onClick={handleSave}
+                  >
                     Save options
                   </md-filled-button>
                 </div>
@@ -584,11 +596,17 @@ function OptionsDialog({
                   Approved drafts and session logs are not touched.
                 </div>
                 <div className="modal-actions">
-                  <md-outlined-button type="button" disabled={resetting} onClick={onClose}>
+                  <md-outlined-button
+                    type="button"
+                    className="app-action-shape"
+                    disabled={resetting}
+                    onClick={onClose}
+                  >
                     Cancel
                   </md-outlined-button>
                   <md-filled-button
                     type="button"
+                    className="app-action-shape"
                     disabled={processing || resetting}
                     onClick={() => void onReset()}
                   >

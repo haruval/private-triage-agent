@@ -8,6 +8,7 @@ import type { QueueRecordDTO, ReviewAction } from './api'
 import {
   categoryClass,
   confidenceClass,
+  formatEmailDate,
   formatImportance,
   importanceClass,
   provenanceClass,
@@ -55,10 +56,16 @@ export default function RecordDetail({
           {r.email.subject || '(no subject)'}
         </h2>
 
-        <div className="kv">
+        <div className="kv kv-tight">
           <span className="k">from</span>
           <span>{r.email.from_addr || '(unknown)'}</span>
         </div>
+        {formatEmailDate(r.email.date) && (
+          <div className="kv kv-tight">
+            <span className="k">sent</span>
+            <span>{formatEmailDate(r.email.date)}</span>
+          </div>
+        )}
         <div className="section-label">original message:</div>
         <pre className="original-body">{r.email.body_plain || '(empty body)'}</pre>
 
@@ -147,20 +154,20 @@ export default function RecordDetail({
         <div className="actions">
           <md-filled-tonal-button
             type="button"
-            className="flat-tonal-action"
+            className="app-action-shape flat-tonal-action"
             disabled={busy || !hasDraft || !draftText.trim()}
             onClick={() => onAction(r, approveAction, draftText)}
           >
             {edited ? 'Approve edit' : 'Approve'}
           </md-filled-tonal-button>
-          <md-outlined-button
+          <md-filled-tonal-button
             type="button"
-            className="reject-action"
+            className="app-action-shape flat-tonal-action reject-action"
             disabled={busy}
             onClick={() => onAction(r, 'reject', '')}
           >
             Reject
-          </md-outlined-button>
+          </md-filled-tonal-button>
           <span className="dim actions-hint">
             Approve only writes the draft locally, nothing is ever sent.
           </span>

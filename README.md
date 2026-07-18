@@ -129,7 +129,7 @@ timing.
 - `data/` - gitignored: corpora, the `inbox/` mbox folder, `queue/` ledgers, approved drafts
 - `configs/` - YAML config files
 
-## Setup
+## Get Started
 
 A fresh clone requires Python 3.12+, Node.js 20+, and
 [Ollama](https://ollama.com/) installed and running locally with
@@ -184,33 +184,22 @@ The key is optional: without it, drafts stay local and the queue falls back to
 escalation-score ordering. IMAP settings can be entered through the web UI's
 **Connect IMAP** form, which writes them to `.env`.
 
-After that one-time setup, the recurring startup commands are:
+After that one-time setup, start the complete web app with:
 
 ```sh
-make api    # terminal 1 — start first; writes frontend/.dev-token
-make web    # terminal 2 — open http://localhost:5173
+python triage
 ```
 
-You do not need to activate the venv for those Make targets. `make api` and
-`make web` do not install dependencies: the former expects `venv/`, and the
-latter expects `frontend/node_modules/`.
+This starts the API and Vite server in the required order, opens
+`http://localhost:5173` in your default browser, and stops both servers when
+you press Ctrl-C. Use `python triage --no-browser` when you do not want the
+browser opened automatically. You do not need to activate the venv; the
+launcher uses `venv/` and expects `frontend/node_modules/` from the one-time
+setup above.
 
-## Web UI (the main pipeline)
+### 1. Run
 
-The browser covers the full `start` / `start-imap` → `review` flow. It
-fills the same pending queue, ranks it most-important-first, and writes review
-decisions through the same persistence path as the CLI. No CLI
-commands are required when you use the web UI.
-
-### 1. Start the API and web server
-
-Run these in separate terminals, in this order:
-
-```sh
-make api    # terminal 1 — the Python API on 127.0.0.1:8765
-make web    # terminal 2 — the Vite dev server; open http://localhost:5173
-```
-
+Start the app with `python triage` as above.
 The API writes a per-run token to `frontend/.dev-token`. The Vite proxy
 re-reads and injects that token into every `/api` request, so browser
 JavaScript never sees it.
@@ -276,11 +265,9 @@ the per-run token (which browser JavaScript never sees; the proxy adds it), pass
 an exact `Host` allowlist, and (for writes) an `Origin` allowlist. The browser
 also never receives the placeholder→original anonymization mapping or the IMAP
 password. Loopback is not a per-user boundary on a shared machine; the token is
-what actually gates access. And as everywhere else in this project: **nothing
-is ever sent automatically** — approving only writes drafts.
+what actually gates access.
 
 ## Email Ingestion
-
 
 ### Method 1: Download your emails as an MBOX
 If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
@@ -324,129 +311,31 @@ it yourself, and where it goes depends on what email ingestion method you used.
 
 1. **Plain text (always).** Every approved draft is written to
    `data/approved_drafts/<message-id>.txt`.
-2. **mbox source creates a `.eml`.** When the email came from an `.mbox` file
-   (`start`), an `.eml` is written next to the `.txt`.
-   Double-clicking it opens a fully pre-filled reply (recipient, `Re:` subject,
-   threading headers, body) in your email client,
-   so you are one click from sending.
-3. **IMAP source goes to Drafts.** When the email came in over IMAP
+2. **IMAP source goes to Drafts.** When the email came in over IMAP
    (`start-imap`), the reply is APPENDed straight
    into your account's **Drafts** folder, flagged as a draft, so it shows up in
    Gmail / Apple Mail / Outlook ready to review and send, in the same client
    the message came from.
+3. **mbox source creates a `.eml`.** When the email came from an `.mbox` file, 
+  an `.eml` is written next to the `.txt`.
+   Double-clicking it opens a fully pre-filled reply in your email client,
+   so you are one click from sending.
 
-The IMAP APPEND writes to the configured `IMAP_DRAFTS_FOLDER`. The web UI
-prefills `[Gmail]/Drafts` for Gmail, `Draft` for Yahoo, and `Drafts` for the
-other built-in providers, while keeping the value editable. Each queued IMAP
-email records its non-secret account and Drafts-folder routing metadata; if
-you switch accounts, approval asks you to reconnect the account that supplied
-that email instead of putting its draft in the wrong mailbox. This is the only
-write the IMAP layer ever makes, and it is APPEND-only. The final Send is
-always done yourself.
-
-## Get Started
-First, upload an `.mbox` file or
-connect an IMAP account so the app can process and triage new mail.
-Then walk through the browser review queue to approve, edit, or reject each
-draft.
-
-## Command-line interface (optional)
-
-The web UI is the recommended main workflow. These commands operate on the
-same queue and approved-draft paths when you prefer the terminal.
+## CLI (optional)
 
 ```sh
 source venv/bin/activate
-
-# 1. Process everything new in data/inbox (the default folder)
-python -m src.cli start
-
-# 2. Review the queue interactively, most important first
-python -m src.cli review
+python -m src.cli start [folder]       # process new mbox mail (default data/inbox)
+python -m src.cli start-imap --days 7  # same, from unread IMAP mail
+python -m src.cli review               # approve / edit / reject, most important first
+python -m src.cli reset [-y]           # clear the queue ledgers; -y skips the prompt
 ```
 
-`start` scans a folder of `.mbox` files (default `data/inbox/`, or pass a
-path: `start path/to/folder`) and processes every email it hasn't seen
-before: triage locally, score sensitivity, and for escalations anonymize,
-send to Claude, and rehydrate. 
-
-```
-⠧ Re: 3/13 Checkout ━━━━━━━━╸─────────────── 12/47 0:03:12
-```
-
-It then ranks the batch by importance with a single Claude call (the digest
-payload is anonymized before it leaves the box, and Claude's per-email
-reasons are rehydrated locally) and prints a summary table of every pending
-email's summary + action items, most important first:
-
-```
-Review queue - 3 email(s) awaiting review
-┏━━━━━┳━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃   # ┃  imp ┃ email                                                         ┃
-┡━━━━━╇━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│   1 │    9 │ Contract renewal - need your sign-off by Friday               │
-│     │      │ from sarah.chen@northwind.com  •  action_required  •  draft:  │
-│     │      │ Claude  •  escalated                                          │
-│     │      │ Sarah Chen needs the Northwind contract redlines reviewed and │
-│     │      │ the $250,000 figure confirmed before Friday.                  │
-│     │      │   • Review the contract redlines                              │
-│     │      │   • Confirm the $250,000 figure                               │
-│     │      │ (Legal redlines plus a hard Friday deadline; needs a prompt   │
-│     │      │ reply.)                                                       │
-├─────┼──────┼───────────────────────────────────────────────────────────────┤
-│   2 │    5 │ Lunch Thursday?                                               │
-│     │      │ from vivian@example.com  •  needs_reply  •  draft: local      │
-│     │      │ Vivian is asking whether you're free for lunch on Thursday.   │
-│     │      │   • Reply with your availability                              │
-│     │      │ (Routine scheduling; reply when convenient.)                  │
-├─────┼──────┼───────────────────────────────────────────────────────────────┤
-│   3 │    2 │ Weekly newsletter                                             │
-│     │      │ from news@example.com  •  fyi  •  draft: local                │
-│     │      │ …                                                             │
-```
-
-`review` walks through every processed-but-unreviewed email in that order: approve /
-edit / reject each draft, quit anytime, and the rest stays queued for next
-time. Approved drafts land in `data/approved_drafts/` (and, depending on where
-the email came from, a click-to-open `.eml` or an IMAP draft, see
-[Sending approved replies](#sending-approved-replies)); every decision is
-logged to `logs/sessions/<timestamp>.jsonl`.
-
-State lives in two append-only ledgers under `data/queue/`
-(`processed.jsonl`, `reviewed.jsonl`), so re-running `start` only processes
-new mail and `review` never shows the same email twice. **Nothing is ever
-sent automatically.** Escalations and ranking need `ANTHROPIC_API_KEY` (from
-`.env`); if Claude is unreachable, drafts stay local and the queue is sorted
-by escalation score instead.
-
-Useful flags:
-
-```sh
-python -m src.cli start data/inbox --limit 5          # cap how many new emails to process
-python -m src.cli start data/inbox --anonymizer regex # escalation anonymizer (default: combined)
-python -m src.cli review --max-chars 2000             # show more of each original email
-```
-
-`start`/`start-imap` also take `--task`, `--config`, `--queue-dir`; `review`
-also takes `--queue-dir`, `--approved-dir`, `--sessions-dir`.
-
-While testing, `reset` clears the queue so the next `start` reprocesses
-everything (approved drafts and session logs are kept):
-
-```sh
-python -m src.cli reset       # asks for confirmation
-python -m src.cli reset -y    # skip the prompt
-```
-
-
-### Process unread IMAP mail from the CLI
-
-After setting the `IMAP_*` values in `.env`:
-
-```sh
-python -m src.cli start-imap --days 7
-python -m src.cli review
-```
+`start`/`start-imap` also take `--limit`, `--anonymizer regex|regex+ner|combined`,
+`--task`, `--config`, and `--queue-dir`; `review` also takes `--queue-dir`,
+`--approved-dir`, `--sessions-dir`, and `--max-chars`. `reset` deletes the
+processed/reviewed ledgers so the next `start` reprocesses everything —
+approved drafts and session logs are kept.
 
 ## Development testing stuff
 

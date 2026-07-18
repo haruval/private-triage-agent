@@ -11,6 +11,14 @@ export function collapseWhitespace(text: string): string {
   return text.split(/\s+/).filter(Boolean).join(' ')
 }
 
+/** ISO date -> "Jun 9, 2026, 3:42 PM" in local time; '' when missing or the
+ * epoch fallback the loader uses for unparseable Date headers. */
+export function formatEmailDate(iso: string): string {
+  const parsed = new Date(iso)
+  if (Number.isNaN(parsed.getTime()) || parsed.getTime() === 0) return ''
+  return parsed.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
 /** 9.0 -> "9", 7.5 -> "7.5" — matches _format_importance. */
 export function formatImportance(importance: number): string {
   return Number.isInteger(importance) ? String(importance) : importance.toFixed(1)
