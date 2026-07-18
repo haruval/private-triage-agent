@@ -27,6 +27,7 @@ API_ADDRESS = ("127.0.0.1", 8765)
 WEB_ADDRESS = ("127.0.0.1", 5173)
 WEB_URL = "http://localhost:5173"
 STARTUP_TIMEOUT_SECONDS = 30.0
+STOP_GRACE_SECONDS = 5.0
 
 
 class StartupError(RuntimeError):
@@ -62,9 +63,7 @@ def _start(command: list[str], *, cwd: Path) -> subprocess.Popen[bytes]:
     """Start a child in its own group so its descendants can be stopped too."""
     if os.name == "nt":
         new_process_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        return subprocess.Popen(
-            command, cwd=cwd, creationflags=new_process_group
-        )
+        return subprocess.Popen(command, cwd=cwd, creationflags=new_process_group)
     return subprocess.Popen(command, cwd=cwd, start_new_session=True)
 
 
@@ -75,6 +74,36 @@ def _port_is_open(address: tuple[str, int]) -> bool:
             return True
     except OSError:
         return False
+
+
+def _ensure_ports_free() -> None:
+    """Fail fast when either fixed port already has a listener.
+
+    Readiness is later inferred from the same port probes, so a pre-existing
+    listener (usually a stray server from a previous run) would otherwise be
+    mistaken for the child this launcher just started.
+    """
+    for address, label in ((API_ADDRESS, "review API"), (WEB_ADDRESS, "web UI")):
+        if _port_is_open(address):
+            raise StartupError(
+                f"port {address[1]} is already in use — another {label} instance "
+                f"appears to be running (try `lsof -i :{address[1]}`); stop it and rerun"
+            )
+
+
+def _install_signal_handlers() -> None:
+    """Turn termination signals into SystemExit so the cleanup block runs.
+
+    Without this, SIGTERM (or the terminal closing, via SIGHUP) kills the
+    launcher outright and the detached children survive holding their ports.
+    """
+
+    def _raise_exit(signum: int, _frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _raise_exit)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _raise_exit)
 
 
 def _wait_until_ready(
@@ -105,30 +134,41 @@ def _wait_until_ready(
     )
 
 
+def _kill_group(pgid: int, sig: int) -> bool:
+    """Signal a POSIX process group; return False when it no longer exists."""
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+
+
 def _stop_process(process: subprocess.Popen[bytes] | None) -> None:
     """Stop a child process group, escalating after a short grace period."""
-    if process is None or process.poll() is not None:
+    if process is None:
         return
-    try:
-        if os.name == "nt":
+    if os.name == "nt":
+        # Windows has no group kill without a Job Object; stopping the
+        # tracked process is the best this launcher does there.
+        if process.poll() is None:
             process.terminate()
-        else:
-            os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+            try:
+                process.wait(timeout=STOP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        return
+    # Signal the whole group even when the tracked child itself has already
+    # exited: descendants it spawned stay in the group and can outlive it.
+    if not _kill_group(process.pid, signal.SIGTERM):
         process.wait()
         return
-    try:
-        process.wait(timeout=5)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        if os.name == "nt":
-            process.kill()
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    deadline = time.monotonic() + STOP_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if process.poll() is not None and not _kill_group(process.pid, 0):
+            return
+        time.sleep(0.1)
+    _kill_group(process.pid, signal.SIGKILL)
     process.wait()
 
 
@@ -160,19 +200,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Start both servers without opening the default browser.",
     )
     args = parser.parse_args(argv)
+    _install_signal_handlers()
 
     api_process: subprocess.Popen[bytes] | None = None
     web_process: subprocess.Popen[bytes] | None = None
     try:
         python, npm = _check_prerequisites()
+        _ensure_ports_free()
         print("Starting review API…")
         try:
             previous_token = TOKEN_PATH.read_text(encoding="utf-8")
         except OSError:
             previous_token = None
-        api_process = _start(
-            [str(python), "-u", "-m", "src.api.server"], cwd=REPO_ROOT
-        )
+        api_process = _start([str(python), "-u", "-m", "src.api.server"], cwd=REPO_ROOT)
         _wait_until_ready(
             api_process,
             API_ADDRESS,

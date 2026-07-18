@@ -197,15 +197,9 @@ browser opened automatically. You do not need to activate the venv; the
 launcher uses `venv/` and expects `frontend/node_modules/` from the one-time
 setup above.
 
-
 ### 1. Run
 
-From the repository root, run:
-
-```sh
-python triage
-```
-
+Start the app with `python triage` as above.
 The API writes a per-run token to `frontend/.dev-token`. The Vite proxy
 re-reads and injects that token into every `/api` request, so browser
 JavaScript never sees it.
@@ -264,9 +258,16 @@ Diagnostic and development commands — `triage-emails`, `anonymize-emails`,
 `process` / `process-old`, the router `--config` override, and the eval
 scripts — remain terminal-only.
 
+Threat model, in brief: this is a **single-user, local-only** tool. Binding to
+localhost is not a security boundary — any web page in your browser can try to
+reach a localhost port via DNS rebinding or CSRF — so every request must carry
+the per-run token (which browser JavaScript never sees; the proxy adds it), pass
+an exact `Host` allowlist, and (for writes) an `Origin` allowlist. The browser
+also never receives the placeholder→original anonymization mapping or the IMAP
+password. Loopback is not a per-user boundary on a shared machine; the token is
+what actually gates access.
 
 ## Email Ingestion
-
 
 ### Method 1: Download your emails as an MBOX
 If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
@@ -320,8 +321,21 @@ it yourself, and where it goes depends on what email ingestion method you used.
    Double-clicking it opens a fully pre-filled reply in your email client,
    so you are one click from sending.
 
+## CLI (optional)
 
+```sh
+source venv/bin/activate
+python -m src.cli start [folder]       # process new mbox mail (default data/inbox)
+python -m src.cli start-imap --days 7  # same, from unread IMAP mail
+python -m src.cli review               # approve / edit / reject, most important first
+python -m src.cli reset [-y]           # clear the queue ledgers; -y skips the prompt
+```
 
+`start`/`start-imap` also take `--limit`, `--anonymizer regex|regex+ner|combined`,
+`--task`, `--config`, and `--queue-dir`; `review` also takes `--queue-dir`,
+`--approved-dir`, `--sessions-dir`, and `--max-chars`. `reset` deletes the
+processed/reviewed ledgers so the next `start` reprocesses everything —
+approved drafts and session logs are kept.
 
 ## Development testing stuff
 

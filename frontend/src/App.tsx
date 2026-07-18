@@ -287,7 +287,7 @@ export default function App() {
         <md-filled-tonal-button
           type="button"
           className="app-action-shape flat-tonal-action"
-          disabled={isProcessing}
+          disabled={uploading || isProcessing}
           onClick={() => {
             if (imapUsernameFilled) {
               void handleRefreshImap()
