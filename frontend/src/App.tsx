@@ -299,9 +299,6 @@ export default function App() {
           {optionsCustomized ? 'Options *' : 'Options'}
         </md-filled-tonal-button>
         <span className="spacer" />
-        {records !== null && (
-          <span className="dim pending-count">{list.length} pending</span>
-        )}
         <md-filled-tonal-button
           type="button"
           className="topbar-action flat-tonal-action"
