@@ -333,9 +333,13 @@ export default function App() {
           <p className="dim">
             Upload an .mbox file or connect IMAP to fetch and process new mail.
           </p>
-          <md-outlined-button type="button" onClick={() => void refresh()}>
+          <md-filled-tonal-button
+            type="button"
+            className="topbar-action flat-tonal-action"
+            onClick={() => void refresh()}
+          >
             Refresh
-          </md-outlined-button>
+          </md-filled-tonal-button>
         </div>
       ) : (
         <main className="main">
