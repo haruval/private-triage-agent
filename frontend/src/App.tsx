@@ -1,5 +1,5 @@
 // The single-page review app: a top bar with the leading actions, the review
-// queue as the main view, and processing/IMAP settings in an Options dialog.
+// queue as the main view, and processing/IMAP settings in a Settings dialog.
 // The queue polls /api/queue every 15s; approving/rejecting advances to the
 // next pending record, exactly like the terminal `review` loop. Records are
 // keyed by the opaque record_id — the same Message-ID can be pending once
@@ -304,8 +304,8 @@ export default function App() {
           type="button"
           className="app-action-shape flat-tonal-action topbar-options-action"
           disabled={isProcessing}
-          aria-label={optionsCustomized ? 'Options (customized)' : 'Options'}
-          title={optionsCustomized ? 'Options (customized)' : 'Options'}
+          aria-label={optionsCustomized ? 'Settings (customized)' : 'Settings'}
+          title={optionsCustomized ? 'Settings (customized)' : 'Settings'}
           onClick={() => {
             setOptionsSection('advanced')
             setOptionsOpen(true)
@@ -415,7 +415,7 @@ export default function App() {
   )
 }
 
-// Options groups IMAP connection settings, advanced start/start-imap flags,
+// Settings groups IMAP connection settings, advanced start/start-imap flags,
 // and the destructive queue reset into separate sidebar sections. Advanced
 // field edits are local until Save. Router/eval flags stay terminal-only.
 const ANONYMIZERS: { id: Anonymizer; label: string; hint: string }[] = [
@@ -483,7 +483,7 @@ function OptionsDialog({
       <div className="modal-card options-card">
         <header className="options-dialog-header">
           <h3 id="options-dialog-title" className="md-typescale-title-medium">
-            Options
+            Settings
           </h3>
           <button
             type="button"
@@ -495,7 +495,7 @@ function OptionsDialog({
           </button>
         </header>
         <div className="options-layout">
-          <nav className="options-sidebar" aria-label="Options sections">
+          <nav className="options-sidebar" aria-label="Settings sections">
             <button
               type="button"
               className={`options-nav-button ${section === 'imap' ? 'active' : ''}`}
