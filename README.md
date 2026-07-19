@@ -1,6 +1,6 @@
 # private-triage-agent
 
-A privacy-preserving email triage agent. A local model (`gemma3:27b` via Ollama) handles most processing; sensitive content is anonymized through regex → transformer NER → neural coreference, before being sent to the Claude API for harder reasoning, then re-hydrated locally.
+A privacy-preserving email triage agent. A local model (`gemma3:27b` via Ollama) handles most processing; and when harder reasoning is needed, sensitive content is anonymized through regex → transformer NER → neural coreference before it is sent to the Claude API, then re-hydrated locally.
 
 <img src="/assets/images/home.png" width="800">
 <img src="/assets/images/home2.png" width="800">
