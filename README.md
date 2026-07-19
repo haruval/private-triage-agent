@@ -208,35 +208,22 @@ JavaScript never sees it.
 
 ### 2. Add mail
 
-Click **Upload .mbox** to choose an exported mailbox. The app copies it into
-`data/inbox/` and starts processing new messages. Note: This currently only works on Mac, for other platforms you'll have to drag the file in yourself. Sorry!
-
-Or click **Connect IMAP**, enter an app-specific password, and choose **Save &
+Click **Connect IMAP**, enter an app-specific password, and choose **Save &
 process mail**. The form saves the `IMAP_*` values to `.env`, verifies the
 Inbox and Drafts folders, and fetches unread mail without marking it read.
 
-> **IMAGE OF [CONNECT IMAP FORM WITH SAVE AND PROCESS MAIL] HERE**
+Or click **Upload .mbox** to choose an exported mailbox. The app copies it into
+`data/inbox/` and starts processing new messages. Note: This currently only works on Mac, for other platforms you'll have to drag the file in yourself. Sorry!
 
-### 3. Process and rank the batch
+<img src="/docs/images/imap.png" width="800">
 
-The browser shows job status while detailed progress remains visible in the API
-terminal. Local triage runs first; escalated email is anonymized before Claude
-and re-hydrated locally afterward. When the batch finishes, the queue refreshes
-in importance order.
 
-The **Options** dialog exposes processing limit, anonymizer, and task
-instruction under **Advanced**. Its **Reset queue** section clears the
-append-only queue ledgers so the next run reprocesses everything, while leaving
-approved drafts and session logs intact.
-
-> **IMAGE OF [WEB UI PROCESSING STATUS AND ADVANCED OPTIONS] HERE**
-
-### 4. Review drafts
+### 3. Review drafts
 
 Select an email from the ranked queue to see the original message, summary,
 action items, escalation decision, and editable draft.
 
-> **IMAGE OF [RANKED REVIEW QUEUE AND SELECTED EMAIL DETAIL] HERE**
+<img src="/docs/images/reviewlist.png" width="800">
 
 Choose **Approve**, **Approve edit**, or **Reject**. The reviewed email leaves
 the pending queue and the next one is selected. Approved drafts land in
@@ -245,18 +232,13 @@ click-to-open `.eml` or an IMAP draft; see
 [Sending approved replies](#sending-approved-replies). Every decision is logged
 under `logs/sessions/`.
 
-> **IMAGE OF [DRAFT EDITOR WITH APPROVE AND REJECT ACTIONS] HERE**
+<img src="/docs/images/draft.png" width="800">
 
 State lives in two append-only ledgers under `data/queue/`
 (`processed.jsonl`, `reviewed.jsonl`), so processing again only adds unseen
-mail and reviewed email does not reappear. **Nothing is ever sent
-automatically.** If Claude is unreachable, drafts stay local and the queue is
+mail and reviewed email does not reappear. If Claude is unreachable, draft creation stay local and the queue is
 sorted by escalation score instead.
 
-The web UI covers `start`, `start-imap`, `review`, and `reset`.
-Diagnostic and development commands — `triage-emails`, `anonymize-emails`,
-`process` / `process-old`, the router `--config` override, and the eval
-scripts — remain terminal-only.
 
 Threat model, in brief: this is a **single-user, local-only** tool. Binding to
 localhost is not a security boundary — any web page in your browser can try to
