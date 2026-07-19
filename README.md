@@ -2,7 +2,7 @@
 
 A privacy-preserving email triage agent. A local model (`gemma3:27b` via Ollama) handles most processing; sensitive content is anonymized before being sent to the Claude API for harder reasoning, then re-hydrated locally.
 
-> **IMAGE OF [WEB UI REVIEW QUEUE] HERE**
+<img src="/docs/images/home.png width="600"/>
 
 
 ## What it does
@@ -269,16 +269,7 @@ what actually gates access.
 
 ## Email Ingestion
 
-### Method 1: Download your emails as an MBOX
-If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
-1. Open Apple Mail.
-2. Go to Mailbox > New Mailbox in the top menu bar and create a local folder (e.g., name it "Weekly Export" and set the location to "On My Mac").
-3. Use the search bar to find your week. You can use search operators like date:06/02/2026-06/09/2026.
-4. Select all the emails in the search results (Cmd + A) and drag them into your new "Weekly Export" mailbox.
-5. Right-click the "Weekly Export" mailbox in your sidebar and select Export Mailbox.
-6. Upload this file using the "Upload .mbox" button in the web ui, or drag it into data/inbox and run the cli command.
-
-### Method 2: Connect your real inbox over IMAP
+### Method 1: Connect your inbox over IMAP
 
 Use **Connect IMAP** in the web UI to save the account settings and fetch
 unread mail. The equivalent terminal commands are collected in the optional
@@ -303,6 +294,15 @@ IMAP_DRAFTS_FOLDER=[Gmail]/Drafts  # Gmail; provider is prefilled in the web UI
 **USE A PASSWORD JUST FOR THIS, NOT YOUR REAL ACCOUNT PASSWORD. I WOULD NOT TRUST ME THAT MUCH.** For Gmail
 that's Google Account → Security → 2-Step Verification → App passwords; most
 providers have an equivalent.
+
+### Method 2: Upload your emails as an .MBOX
+If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
+1. Open Apple Mail.
+2. Go to Mailbox > New Mailbox in the top menu bar and create a local folder (e.g., name it "Weekly Export" and set the location to "On My Mac").
+3. Use the search bar to find your week. You can use search operators like date:06/02/2026-06/09/2026.
+4. Select all the emails in the search results (Cmd + A) and drag them into your new "Weekly Export" mailbox.
+5. Right-click the "Weekly Export" mailbox in your sidebar and select Export Mailbox.
+6. Upload this file using the "Upload .mbox" button in the web ui, or drag it into data/inbox and run the cli command.
 
 ## Sending approved replies
 
