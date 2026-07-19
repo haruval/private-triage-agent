@@ -127,7 +127,7 @@ export default function App() {
         ) {
           handledProcessId.current = next.id
           if (next.status === 'succeeded') {
-            showToast('Mail processing complete — review queue refreshed')
+            showToast('Mail processing complete - review queue refreshed')
             void refresh()
           } else {
             showToast(`error: ${next.message}`)
