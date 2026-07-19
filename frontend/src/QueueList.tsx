@@ -37,7 +37,7 @@ export default function QueueList({ records, selectedId, onSelect }: Props) {
           >
             <div slot="headline" className="row-head">
               <span className="row-index">{i + 1}</span>
-              <span className={`chip ${importanceClass(r.importance)}`}>
+              <span className={`chip importance-circle ${importanceClass(r.importance)}`}>
                 {formatImportance(r.importance)}
               </span>
               <span className="row-subject">{r.email.subject || '(no subject)'}</span>
