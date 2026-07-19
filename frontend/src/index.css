@@ -14,6 +14,14 @@
   --md-ref-typeface-plain: var(--md-ref-typeface-brand);
   --app-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
+  /* Shared shape for side-by-side action pairs: pill ends face out, compact
+     rounded rectangles face in. The pill radius must be exactly half the
+     40px button height: anything larger (e.g. 999px) makes the browser
+     rescale ALL corners of the box uniformly, flattening the inner radius
+     to near zero. */
+  --pill-pair-outer-radius: 20px;
+  --pill-pair-inner-radius: 10px;
+
   /* Light scheme (default) — vivid blue primary on a pastel blue surface,
      pastel green secondary. */
   --md-sys-color-primary: #2b5cd9;
@@ -184,7 +192,6 @@ code {
 
 .topbar {
   --topbar-action-corner-radius: 14px;
-  --topbar-action-inner-radius: 10px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -215,24 +222,22 @@ code {
   --md-filled-tonal-button-hover-container-elevation: 0;
 }
 
-/* The two intake actions read as a coordinated pair: pill ends face out,
-   while the inner ends keep a compact rounded-rectangle shape, slightly
-   tighter than the settings button so the pair reads as one unit.
-   The pill radius must be exactly half the 40px button height: anything
-   larger (e.g. 999px) makes the browser rescale ALL corners of the box
-   uniformly, flattening the inner radius to near zero. */
-.topbar-upload-action {
-  --md-filled-tonal-button-container-shape-start-start: 20px;
-  --md-filled-tonal-button-container-shape-start-end: var(--topbar-action-inner-radius);
-  --md-filled-tonal-button-container-shape-end-end: var(--topbar-action-inner-radius);
-  --md-filled-tonal-button-container-shape-end-start: 20px;
+/* Buttons that read as a coordinated pair (Upload/Connect, Approve/Reject):
+   pill ends face out, rounded-rectangle ends face in. Shape tokens live on
+   :root — see the note there about the 40px height constraint. */
+.pill-pair-start {
+  --md-filled-tonal-button-container-shape-start-start: var(--pill-pair-outer-radius);
+  --md-filled-tonal-button-container-shape-start-end: var(--pill-pair-inner-radius);
+  --md-filled-tonal-button-container-shape-end-end: var(--pill-pair-inner-radius);
+  --md-filled-tonal-button-container-shape-end-start: var(--pill-pair-outer-radius);
 }
 
-.topbar-imap-action {
-  --md-filled-tonal-button-container-shape-start-start: var(--topbar-action-inner-radius);
-  --md-filled-tonal-button-container-shape-start-end: 20px;
-  --md-filled-tonal-button-container-shape-end-end: 20px;
-  --md-filled-tonal-button-container-shape-end-start: var(--topbar-action-inner-radius);
+.pill-pair-end {
+  --md-filled-tonal-button-container-shape-start-start: var(--pill-pair-inner-radius);
+  --md-filled-tonal-button-container-shape-start-end: var(--pill-pair-outer-radius);
+  --md-filled-tonal-button-container-shape-end-end: var(--pill-pair-outer-radius);
+  --md-filled-tonal-button-container-shape-end-start: var(--pill-pair-inner-radius);
+  margin-inline-start: -4px;
 }
 
 .topbar-options-action {

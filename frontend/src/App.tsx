@@ -279,7 +279,7 @@ export default function App() {
         <span className="app-title md-typescale-title-large">private triage agent</span>
         <md-filled-tonal-button
           type="button"
-          className="app-action-shape flat-tonal-action topbar-upload-action"
+          className="app-action-shape flat-tonal-action pill-pair-start"
           disabled={uploading || isProcessing}
           onClick={() => void handleUploadMbox()}
         >
@@ -287,7 +287,7 @@ export default function App() {
         </md-filled-tonal-button>
         <md-filled-tonal-button
           type="button"
-          className="app-action-shape flat-tonal-action topbar-imap-action"
+          className="app-action-shape flat-tonal-action pill-pair-end"
           disabled={uploading || isProcessing}
           onClick={() => {
             if (imapUsernameFilled) {

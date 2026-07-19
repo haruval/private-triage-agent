@@ -154,7 +154,7 @@ export default function RecordDetail({
         <div className="actions">
           <md-filled-tonal-button
             type="button"
-            className="app-action-shape flat-tonal-action"
+            className="app-action-shape flat-tonal-action pill-pair-start"
             disabled={busy || !hasDraft || !draftText.trim()}
             onClick={() => onAction(r, approveAction, draftText)}
           >
@@ -162,7 +162,7 @@ export default function RecordDetail({
           </md-filled-tonal-button>
           <md-filled-tonal-button
             type="button"
-            className="app-action-shape flat-tonal-action reject-action"
+            className="app-action-shape flat-tonal-action reject-action pill-pair-end"
             disabled={busy}
             onClick={() => onAction(r, 'reject', '')}
           >
