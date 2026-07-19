@@ -315,77 +315,79 @@ export default function App() {
         </md-filled-tonal-button>
       </header>
 
-      {isProcessing && processing && (
-        <div className="processing-banner" role="status">
-          <span>{processing.message}</span>
-          {processing.progress_total !== null && processing.progress_total > 0 ? (
-            <>
-              <md-linear-progress
-                value={(processing.progress_done ?? 0) / processing.progress_total}
-              />
-              <span className="dim">
-                {processing.progress_done ?? 0} of {processing.progress_total} email
-                {processing.progress_total === 1 ? '' : 's'} processed
-              </span>
-            </>
-          ) : (
-            <>
-              <md-circular-progress indeterminate />
-              <span className="dim">
-                Detailed progress is also visible in the API terminal.
-              </span>
-            </>
-          )}
-        </div>
-      )}
+      <div className="app-body">
+        {isProcessing && processing && (
+          <div className="processing-banner" role="status">
+            <span>{processing.message}</span>
+            {processing.progress_total !== null && processing.progress_total > 0 ? (
+              <>
+                <md-linear-progress
+                  value={(processing.progress_done ?? 0) / processing.progress_total}
+                />
+                <span className="dim">
+                  {processing.progress_done ?? 0} of {processing.progress_total} email
+                  {processing.progress_total === 1 ? '' : 's'} processed
+                </span>
+              </>
+            ) : (
+              <>
+                <md-circular-progress indeterminate />
+                <span className="dim">
+                  Detailed progress is also visible in the API terminal.
+                </span>
+              </>
+            )}
+          </div>
+        )}
 
-      {apiError && (
-        <div className="api-error" role="alert">
-          API unreachable ({apiError}) - is the backend running? Start it with
-          <code> make api</code>.
-        </div>
-      )}
+        {apiError && (
+          <div className="api-error" role="alert">
+            API unreachable ({apiError}) - is the backend running? Start it with
+            <code> make api</code>.
+          </div>
+        )}
 
-      {records === null ? (
-        <div className="empty-state dim">Loading queue…</div>
-      ) : list.length === 0 ? (
-        <div className="empty-state">
-          <p className="md-typescale-title-medium">
-            Nothing to review, the queue is empty.
-          </p>
-          <p className="dim">
-            Upload an .mbox file or connect IMAP to fetch and process new mail.
-          </p>
-          <md-filled-tonal-button
-            type="button"
-            className="app-action-shape flat-tonal-action"
-            onClick={() => void refresh()}
-          >
-            Refresh
-          </md-filled-tonal-button>
-        </div>
-      ) : (
-        <main className="main">
-          <QueueList
-            records={list}
-            selectedId={selected?.record_id ?? null}
-            onSelect={setSelectedId}
-          />
-          {selected && (
-            <RecordDetail
-              record={selected}
-              index={list.indexOf(selected) + 1}
-              total={list.length}
-              draftText={edits[selected.record_id] ?? selected.draft ?? ''}
-              busy={busy}
-              onDraftChange={(text) =>
-                setEdits((prev) => ({ ...prev, [selected.record_id]: text }))
-              }
-              onAction={(rec, action, draft) => void handleAction(rec, action, draft)}
+        {records === null ? (
+          <div className="empty-state dim">Loading queue…</div>
+        ) : list.length === 0 ? (
+          <div className="empty-state">
+            <p className="md-typescale-title-medium">
+              Nothing to review, the queue is empty.
+            </p>
+            <p className="dim">
+              Upload an .mbox file or connect IMAP to fetch and process new mail.
+            </p>
+            <md-filled-tonal-button
+              type="button"
+              className="app-action-shape flat-tonal-action"
+              onClick={() => void refresh()}
+            >
+              Refresh
+            </md-filled-tonal-button>
+          </div>
+        ) : (
+          <main className="main">
+            <QueueList
+              records={list}
+              selectedId={selected?.record_id ?? null}
+              onSelect={setSelectedId}
             />
-          )}
-        </main>
-      )}
+            {selected && (
+              <RecordDetail
+                record={selected}
+                index={list.indexOf(selected) + 1}
+                total={list.length}
+                draftText={edits[selected.record_id] ?? selected.draft ?? ''}
+                busy={busy}
+                onDraftChange={(text) =>
+                  setEdits((prev) => ({ ...prev, [selected.record_id]: text }))
+                }
+                onAction={(rec, action, draft) => void handleAction(rec, action, draft)}
+              />
+            )}
+          </main>
+        )}
+      </div>
 
       {optionsOpen && (
         <OptionsDialog
