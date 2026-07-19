@@ -225,6 +225,7 @@ Select an email from the ranked queue to see the original message, summary,
 action items, escalation decision, and editable draft.
 
 <img src="/assets/images/queue.png" width="800">
+<img src="/assets/images/details.png" width="800">
 
 Choose **Approve**, **Approve edit**, or **Reject**. The reviewed email leaves
 the pending queue and the next one is selected. Approved drafts land in
