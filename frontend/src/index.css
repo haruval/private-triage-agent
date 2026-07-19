@@ -148,6 +148,23 @@ body {
   line-height: 1.45;
 }
 
+/* Material Web currently ships the baseline menu on the web. Bring selects
+   closer to the M3 Expressive vertical-menu treatment: a rounder anchor and
+   menu surface, inset pill-shaped rows, and a tertiary selected state. */
+md-outlined-select {
+  --md-outlined-select-text-field-container-shape: 16px;
+  --md-menu-container-shape: 20px;
+  --md-menu-container-color: var(--md-sys-color-surface-container-lowest);
+  --md-menu-container-elevation: 3;
+}
+
+md-outlined-select md-select-option {
+  margin: 3px 8px;
+  border-radius: 14px;
+  --md-menu-item-selected-container-color: var(--md-sys-color-tertiary-container);
+  --md-menu-item-selected-label-text-color: var(--md-sys-color-on-tertiary-container);
+}
+
 code {
   font-family: var(--app-mono);
   font-size: 0.92em;
