@@ -23,7 +23,7 @@ export default function QueueList({ records, selectedId, onSelect }: Props) {
   return (
     <nav className="queue-pane" aria-label="Review queue">
       <div className="queue-title md-typescale-title-medium">
-        Review queue: {records.length} email{records.length === 1 ? '' : 's'} awaiting
+        {records.length} email{records.length === 1 ? '' : 's'} awaiting
         review
       </div>
       <md-list className="queue-list">
