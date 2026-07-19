@@ -2,7 +2,7 @@
 
 A privacy-preserving email triage agent. A local model (`gemma3:27b` via Ollama) handles most processing; sensitive content is anonymized before being sent to the Claude API for harder reasoning, then re-hydrated locally.
 
-<img src="/docs/images/home.png" width="800">
+<img src="/assets/images/home.png" width="800">
 
 
 ## What it does
@@ -204,7 +204,7 @@ The API writes a per-run token to `frontend/.dev-token`. The Vite proxy
 re-reads and injects that token into every `/api` request, so browser
 JavaScript never sees it.
 
-> **IMAGE OF [EMPTY WEB UI WITH UPLOAD MBOX, CONNECT IMAP, AND OPTIONS] HERE**
+<img src="/assets/images/empty.png" width="800">
 
 ### 2. Add mail
 
@@ -215,7 +215,7 @@ Inbox and Drafts folders, and fetches unread mail without marking it read.
 Or click **Upload .mbox** to choose an exported mailbox. The app copies it into
 `data/inbox/` and starts processing new messages. Note: This currently only works on Mac, for other platforms you'll have to drag the file in yourself. Sorry!
 
-<img src="/docs/images/imap.png" width="800">
+<img src="/assets/images/imap.png" width="800">
 
 
 ### 3. Review drafts
@@ -223,7 +223,7 @@ Or click **Upload .mbox** to choose an exported mailbox. The app copies it into
 Select an email from the ranked queue to see the original message, summary,
 action items, escalation decision, and editable draft.
 
-<img src="/docs/images/reviewlist.png" width="800">
+<img src="/assets/images/queue.png" width="800">
 
 Choose **Approve**, **Approve edit**, or **Reject**. The reviewed email leaves
 the pending queue and the next one is selected. Approved drafts land in
@@ -232,7 +232,7 @@ click-to-open `.eml` or an IMAP draft; see
 [Sending approved replies](#sending-approved-replies). Every decision is logged
 under `logs/sessions/`.
 
-<img src="/docs/images/draft.png" width="800">
+<img src="/assets/images/draft.png" width="800">
 
 State lives in two append-only ledgers under `data/queue/`
 (`processed.jsonl`, `reviewed.jsonl`), so processing again only adds unseen
