@@ -28,6 +28,7 @@ import type { MdSelectElement, MdTextFieldElement } from './declarations'
 import QueueList from './QueueList'
 import RecordDetail from './RecordDetail'
 import SettingsView from './SettingsView'
+import settingsIcon from './assets/settings.svg'
 
 const POLL_MS = 15_000
 const PROCESS_POLL_MS = 2_000
@@ -278,7 +279,7 @@ export default function App() {
         <span className="app-title md-typescale-title-large">private triage agent</span>
         <md-filled-tonal-button
           type="button"
-          className="app-action-shape flat-tonal-action"
+          className="app-action-shape flat-tonal-action topbar-upload-action"
           disabled={uploading || isProcessing}
           onClick={() => void handleUploadMbox()}
         >
@@ -286,7 +287,7 @@ export default function App() {
         </md-filled-tonal-button>
         <md-filled-tonal-button
           type="button"
-          className="app-action-shape flat-tonal-action"
+          className="app-action-shape flat-tonal-action topbar-imap-action"
           disabled={uploading || isProcessing}
           onClick={() => {
             if (imapUsernameFilled) {
@@ -301,14 +302,16 @@ export default function App() {
         </md-filled-tonal-button>
         <md-filled-tonal-button
           type="button"
-          className="app-action-shape flat-tonal-action"
+          className="app-action-shape flat-tonal-action topbar-options-action"
           disabled={isProcessing}
+          aria-label={optionsCustomized ? 'Options (customized)' : 'Options'}
+          title={optionsCustomized ? 'Options (customized)' : 'Options'}
           onClick={() => {
             setOptionsSection('advanced')
             setOptionsOpen(true)
           }}
         >
-          {optionsCustomized ? 'Options *' : 'Options'}
+          <img slot="icon" className="settings-icon" src={settingsIcon} alt="" />
         </md-filled-tonal-button>
       </header>
 

@@ -183,6 +183,8 @@ code {
 }
 
 .topbar {
+  --topbar-action-corner-radius: 14px;
+  --topbar-action-inner-radius: 10px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -211,6 +213,50 @@ code {
 /* Preserve the tonal hover tint without Material's hover elevation. */
 .flat-tonal-action {
   --md-filled-tonal-button-hover-container-elevation: 0;
+}
+
+/* The two intake actions read as a coordinated pair: pill ends face out,
+   while the inner ends keep a compact rounded-rectangle shape, slightly
+   tighter than the settings button so the pair reads as one unit.
+   The pill radius must be exactly half the 40px button height: anything
+   larger (e.g. 999px) makes the browser rescale ALL corners of the box
+   uniformly, flattening the inner radius to near zero. */
+.topbar-upload-action {
+  --md-filled-tonal-button-container-shape-start-start: 20px;
+  --md-filled-tonal-button-container-shape-start-end: var(--topbar-action-inner-radius);
+  --md-filled-tonal-button-container-shape-end-end: var(--topbar-action-inner-radius);
+  --md-filled-tonal-button-container-shape-end-start: 20px;
+}
+
+.topbar-imap-action {
+  --md-filled-tonal-button-container-shape-start-start: var(--topbar-action-inner-radius);
+  --md-filled-tonal-button-container-shape-start-end: 20px;
+  --md-filled-tonal-button-container-shape-end-end: 20px;
+  --md-filled-tonal-button-container-shape-end-start: var(--topbar-action-inner-radius);
+}
+
+.topbar-options-action {
+  --md-filled-tonal-button-container-shape: var(--topbar-action-corner-radius);
+  --md-filled-tonal-button-leading-space: 12px;
+  --md-filled-tonal-button-trailing-space: 12px;
+  --md-filled-tonal-button-with-leading-icon-leading-space: 12px;
+  --md-filled-tonal-button-with-leading-icon-trailing-space: 12px;
+  gap: 0;
+  width: 48px;
+  height: 40px;
+  min-width: 48px;
+  max-width: 48px;
+}
+
+.settings-icon {
+  width: 24px;
+  height: 24px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .settings-icon {
+    filter: invert(1);
+  }
 }
 
 .api-error {
