@@ -2,8 +2,8 @@
 
 A privacy-preserving email triage agent. A local model (`gemma3:27b` via Ollama) handles most processing; sensitive content is anonymized before being sent to the Claude API for harder reasoning, then re-hydrated locally.
 
-<img src="docs/images/start.png" alt="start" width="600">
-<img src="docs/images/review.png" alt="review" width="600">
+<img src="/assets/images/home.png" width="800">
+<img src="/assets/images/home2.png" width="800">
 
 
 ## What it does
@@ -15,8 +15,9 @@ draft, then **re-hydrated** locally. Nothing is sent automatically: every draft
 is reviewed by you first. 
 
 Under the hood, it runs three sequential layers, each covering a failure mode the
-others structurally miss. The default (`combined`) runs all three; you can
-select a single layer with `--anonymizer`.
+others structurally miss. The default (`combined`) runs all three; `--anonymizer`
+selects a smaller stack (`regex+ner` for the first two layers, `regex` for the
+first alone).
 
 - **Deterministic regex** for fixed-shape PII: emails, phone numbers, dollar
   amounts, dates. Fast and exact, but can't work on anything without a predictable
@@ -30,12 +31,13 @@ select a single layer with `--anonymizer`.
   links every pronoun back to the entity it refers to. Coref predicts mention
   clusters, every span that points to the same entity, returned as character
   offsets, so "Sarah," "she," and "her" come back as one chain. Each pronoun
-  then inherits its placeholder from that cluster and the model finds the mention
-  in the chain that overlaps an entity NER already tagged (`Sarah → Alex_P1`)
-  and rewrites every other mention in the chain to the same `Alex_P1`. This
-  offset-based linking lets a bare "she" three sentences later resolve
-  to the correct person rather than just being a generic redaction. Pronouns aren't named
-  entities, so NER can't touch them; only the coref chain can.
+  gets a grammatical placeholder linked by suffix to the entity NER already
+  tagged (`Sarah → Alex_P1`, `she → They_P1`, `her → Their_P1`). Claude can
+  see that all three refer to entity `P1`, while local re-hydration restores
+  each original form exactly. This offset-based linking lets a bare "she"
+  three sentences later resolve to the correct person rather than just being
+  a generic redaction. Pronouns aren't named entities, so NER can't touch them;
+  only the coref chain can.
   `scripts/eval_pronoun_leak.py` measures how many such leaks slip through with
   and without this layer. (`en_coreference_web_trf`, spaCy's own experimental
   coref, doesn't work on Apple Silicon rn, which is why fastcoref is used
@@ -53,14 +55,6 @@ Claude responds. Because coreference models are imperfect, a held-out eval
 harness reports the residual PII leak rate per layer.
 
 
-You work in two steps. `start` processes new emails and prints an
-importance-ranked summary of what's waiting. `review` then walks through those drafts
-one by one so you can approve, edit, or reject each one.
-
-```sh
-python -m src.cli start    # process all new mail, rank by importance
-python -m src.cli review   # approve / edit / reject, most important first
-```
 Here's one example of an email going through the pipeline.
 
 **1. Incoming email**
@@ -118,6 +112,8 @@ Thursday works for my schedule. I'll give you a call at (415) 555-0182 to confir
 timing.
 ```
 
+
+
 ## Layout
 
 - `src/ingestion/` - loaders for `.mbox` files and read-only IMAP
@@ -126,134 +122,142 @@ timing.
 - `src/router/` - sensitivity scoring, escalation logic, importance ranking
 - `src/delegate/` - Claude API client
 - `src/review_queue.py` - append-only processed/reviewed ledgers behind `start` + `review`
+- `src/review_actions.py` - shared persistence for review decisions (CLI + web)
+- `src/api/` - localhost-only HTTP API behind the web review UI
 - `src/eval/` - evaluation harness and leak detector
+- `frontend/` - Vite + React + Material Web review UI (talks to `src/api/`)
 - `tests/` - pytest tests
 - `data/` - gitignored: corpora, the `inbox/` mbox folder, `queue/` ledgers, approved drafts
 - `configs/` - YAML config files
 
-## Setup
+## Get Started
 
-Requires Python 3.12+ and [Ollama](https://ollama.com/) installed locally with `gemma3:27b` pulled.
-
-
-`ollama pull gemma3:27b` (~17 GB)
+A fresh clone requires Python 3.12+, Node.js 20+, and
+[Ollama](https://ollama.com/) installed and running locally with
+`gemma3:27b` pulled:
 
 ```sh
-make install            # create venv, install requirements, download spaCy model
-ALLOW_RECENT_PACKAGES=1 make install            #i put a min package date lock to be extra safe but you can bypass it with this command if you need to
-cp .env.example .env    # fill in ANTHROPIC_API_KEY
+ollama pull gemma3:27b    # about 17 GB
 ```
-make install builds the venv with python3.12 by default. If that exact
+
+Run the project installation once from the repository root:
+
+```sh
+make install              # create venv and install/cache the local models
+cd frontend && npm install
+cd ..
+```
+
+`make install` builds the venv with `python3.12` by default. If that exact
 executable isn't on your PATH, point it at your interpreter, e.g.
-make install PYTHON_BIN=python3 (must be Python 3.12+).
+`make install PYTHON_BIN=python3` (must be Python 3.12+).
 
-## Usage: start + review (the main pipeline)
+The package-age check rejects locked dependencies younger than 14 days. It
+checks PyPI upload times and the official GitHub release-asset creation time
+for the hashed `en_core_web_trf` wheel, and fails closed if metadata is
+unavailable or a lockfile entry cannot be verified. After reviewing the
+dependency, bypass it deliberately with
+`ALLOW_RECENT_PACKAGES=1 make install`.
+
+The install also downloads about 365 MB for `biu-nlp/f-coref`. Its immutable
+commit, official commit time, required files, and SHA-256 hashes are locked in
+`configs/coref_model.lock.json`. Setup applies the same `MIN_AGE_DAYS` window
+to that model revision; after deliberate review, only the model check can be
+bypassed with `ALLOW_RECENT_MODELS=1`.
+
+Setup uses the shared Hugging Face cache only as a download source, then copies
+exactly the locked files into an isolated runtime directory under `venv/`.
+The runtime copy contains no symlinks or unlisted files and is hash-checked
+before every load, so Transformers cannot select an alternate checkpoint.
+Processing uses only that copy and an in-memory spaCy tokenizer: it never
+contacts Hugging Face or downloads another spaCy model while handling mail.
+If the runtime copy is removed, restore it with
+`venv/bin/python scripts/cache_coref_model.py`. `make clean` removes the runtime
+copy; the shared download cache may remain so the next install can reuse it.
+
+Claude escalation and ranking need `ANTHROPIC_API_KEY`. To enable them:
 
 ```sh
-source venv/bin/activate
-
-# 1. Process everything new in data/inbox (the default folder)
-python -m src.cli start
-
-# 2. Review the queue interactively, most important first
-python -m src.cli review
+cp .env.example .env      # fill in ANTHROPIC_API_KEY
 ```
 
-`start` scans a folder of `.mbox` files (default `data/inbox/`, or pass a
-path: `start path/to/folder`) and processes every email it hasn't seen
-before: triage locally, score sensitivity, and for escalations anonymize,
-send to Claude, and rehydrate. 
+The key is optional: without it, drafts stay local and the queue falls back to
+escalation-score ordering. IMAP settings can be entered through the web UI's
+**Connect IMAP** form, which writes them to `.env`.
 
-```
-⠧ Re: 3/13 Checkout ━━━━━━━━╸─────────────── 12/47 0:03:12
-```
+After that one-time setup, start the complete web app with:
 
-It then ranks the batch by importance with a single Claude call (the digest
-payload is anonymized before it leaves the box, and Claude's per-email
-reasons are rehydrated locally) and prints a summary table of every pending
-email's summary + action items, most important first:
-
-```
-Review queue - 3 email(s) awaiting review
-┏━━━━━┳━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃   # ┃  imp ┃ email                                                         ┃
-┡━━━━━╇━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│   1 │    9 │ Contract renewal - need your sign-off by Friday               │
-│     │      │ from sarah.chen@northwind.com  •  action_required  •  draft:  │
-│     │      │ Claude  •  escalated                                          │
-│     │      │ Sarah Chen needs the Northwind contract redlines reviewed and │
-│     │      │ the $250,000 figure confirmed before Friday.                  │
-│     │      │   • Review the contract redlines                              │
-│     │      │   • Confirm the $250,000 figure                               │
-│     │      │ (Legal redlines plus a hard Friday deadline; needs a prompt   │
-│     │      │ reply.)                                                       │
-├─────┼──────┼───────────────────────────────────────────────────────────────┤
-│   2 │    5 │ Lunch Thursday?                                               │
-│     │      │ from vivian@example.com  •  needs_reply  •  draft: local      │
-│     │      │ Vivian is asking whether you're free for lunch on Thursday.   │
-│     │      │   • Reply with your availability                              │
-│     │      │ (Routine scheduling; reply when convenient.)                  │
-├─────┼──────┼───────────────────────────────────────────────────────────────┤
-│   3 │    2 │ Weekly newsletter                                             │
-│     │      │ from news@example.com  •  fyi  •  draft: local                │
-│     │      │ …                                                             │
+```sh
+python triage
 ```
 
-`review` walks through every processed-but-unreviewed email in that order: approve /
-edit / reject each draft, quit anytime, and the rest stays queued for next
-time. Approved drafts land in `data/approved_drafts/` (and, depending on where
-the email came from, a click-to-open `.eml` or an IMAP draft, see
-[Sending approved replies](#sending-approved-replies)); every decision is
-logged to `logs/sessions/<timestamp>.jsonl`.
+This starts the API and Vite server in the required order, opens
+`http://localhost:5173` in your default browser, and stops both servers when
+you press Ctrl-C. Use `python triage --no-browser` when you do not want the
+browser opened automatically. You do not need to activate the venv; the
+launcher uses `venv/` and expects `frontend/node_modules/` from the one-time
+setup above.
+
+### 1. Run
+
+Start the app with `python triage` as above. Note:
+The API writes a per-run token to `frontend/.dev-token`. The Vite proxy
+re-reads and injects that token into every `/api` request, so browser
+JavaScript never sees it.
+
+<img src="/assets/images/empty.png" width="800">
+
+### 2. Add mail
+
+Click **Connect IMAP**, enter an app-specific password, and choose **Save &
+process mail**. The form saves the `IMAP_*` values to `.env`, verifies the
+Inbox and Drafts folders, and fetches unread mail without marking it read.
+
+Or click **Upload .mbox** to choose an exported mailbox. The app copies it into
+`data/inbox/` and starts processing new messages. Note: This currently only works on Mac, for other platforms you'll have to drag the file in yourself. Sorry!
+
+<img src="/assets/images/imap2.png" width="800">
+
+
+### 3. Review drafts
+
+Select an email from the ranked queue to see the original message, summary,
+action items, escalation decision, and editable draft.
+
+<img src="/assets/images/queue.png" width="800">
+<img src="/assets/images/details.png" width="800">
+
+Choose **Approve**, **Approve edit**, or **Reject**. The reviewed email leaves
+the pending queue and the next one is selected. Approved drafts land in
+`data/approved_drafts/` and, depending on the ingestion source, also become a
+click-to-open `.eml` or an IMAP draft; see
+[Sending approved replies](#sending-approved-replies). Every decision is logged
+under `logs/sessions/`.
+
+<img src="/assets/images/draft.png" width="800">
 
 State lives in two append-only ledgers under `data/queue/`
-(`processed.jsonl`, `reviewed.jsonl`), so re-running `start` only processes
-new mail and `review` never shows the same email twice. **Nothing is ever
-sent automatically.** Escalations and ranking need `ANTHROPIC_API_KEY` (from
-`.env`); if Claude is unreachable, drafts stay local and the queue is sorted
-by escalation score instead.
+(`processed.jsonl`, `reviewed.jsonl`), so processing again only adds unseen
+mail and reviewed email does not reappear. If Claude is unreachable, draft creation stay local and the queue is
+sorted by escalation score instead.
 
-Useful flags:
 
-```sh
-python -m src.cli start data/inbox --limit 5          # cap how many new emails to process
-python -m src.cli start data/inbox --anonymizer regex # escalation anonymizer (default: combined)
-python -m src.cli review --max-chars 2000             # show more of each original email
-```
-
-`start`/`start-imap` also take `--task`, `--config`, `--queue-dir`; `review`
-also takes `--queue-dir`, `--approved-dir`, `--sessions-dir`.
-
-While testing, `reset` clears the queue so the next `start` reprocesses
-everything (approved drafts and session logs are kept):
-
-```sh
-python -m src.cli reset       # asks for confirmation
-python -m src.cli reset -y    # skip the prompt
-```
-
+Threat model, in brief: this is a **single-user, local-only** tool. Binding to
+localhost is not a security boundary — any web page in your browser can try to
+reach a localhost port via DNS rebinding or CSRF — so every request must carry
+the per-run token (which browser JavaScript never sees; the proxy adds it), pass
+an exact `Host` allowlist, and (for writes) an `Origin` allowlist. The browser
+also never receives the placeholder→original anonymization mapping or the IMAP
+password. Loopback is not a per-user boundary on a shared machine; the token is
+what actually gates access.
 
 ## Email Ingestion
 
+### Method 1: Connect your inbox over IMAP
 
-### Method 1: Download your emails as an MBOX 
-If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
-1. Open Apple Mail.
-2. Go to Mailbox > New Mailbox in the top menu bar and create a local folder (e.g., name it "Weekly Export" and set the location to "On My Mac").
-3. Use the search bar to find your week. You can use search operators like date:06/02/2026-06/09/2026.
-4. Select all the emails in the search results (Cmd + A) and drag them into your new "Weekly Export" mailbox.
-5. Right-click the "Weekly Export" mailbox in your sidebar and select Export Mailbox.
-6. Drag this file into data/inbox
-
-### Method 2: Connect your real inbox over IMAP
-
-`start-imap` is `start` fed by unread mail from an IMAP account instead of a
-folder. 
-
-```sh
-python -m src.cli start-imap --days 7   # unread from the last 7 days
-python -m src.cli review
-```
+Use **Connect IMAP** in the web UI to save the account settings and fetch
+unread mail. The equivalent terminal commands are collected in the optional
+[command-line interface](#command-line-interface-optional) section below.
 
 Reading is **read-only** (stdlib `imaplib`): the folder is opened with
 `readonly=True` and bodies are fetched with `BODY.PEEK[]`, so nothing is ever
@@ -268,11 +272,21 @@ IMAP_HOST=imap.gmail.com
 IMAP_USER=you@example.com
 IMAP_PASS=<imap app password *see below*>
 IMAP_FOLDER=INBOX          # optional
+IMAP_DRAFTS_FOLDER=[Gmail]/Drafts  # Gmail; provider is prefilled in the web UI
 ```
 
 **USE A PASSWORD JUST FOR THIS, NOT YOUR REAL ACCOUNT PASSWORD. I WOULD NOT TRUST ME THAT MUCH.** For Gmail
 that's Google Account → Security → 2-Step Verification → App passwords; most
-providers have an equivalent. 
+providers have an equivalent.
+
+### Method 2: Upload your emails as an .MBOX
+If you're on Mac, Apple Mail is easiest way to export directly to .mbox.
+1. Open Apple Mail.
+2. Go to Mailbox > New Mailbox in the top menu bar and create a local folder (e.g., name it "Weekly Export" and set the location to "On My Mac").
+3. Use the search bar to find your week. You can use search operators like date:06/02/2026-06/09/2026.
+4. Select all the emails in the search results (Cmd + A) and drag them into your new "Weekly Export" mailbox.
+5. Right-click the "Weekly Export" mailbox in your sidebar and select Export Mailbox.
+6. Upload this file using the "Upload .mbox" button in the web ui, or drag it into data/inbox and run the cli command.
 
 ## Sending approved replies
 
@@ -281,26 +295,31 @@ it yourself, and where it goes depends on what email ingestion method you used.
 
 1. **Plain text (always).** Every approved draft is written to
    `data/approved_drafts/<message-id>.txt`.
-2. **mbox source creates a `.eml`.** When the email came from an `.mbox` file
-   (`start`), an `.eml` is written next to the `.txt`.
-   Double-clicking it opens a fully pre-filled reply (recipient, `Re:` subject,
-   threading headers, body) in your email client,
-   so you are one click from sending.
-3. **IMAP source goes to Drafts.** When the email came in over IMAP
+2. **IMAP source goes to Drafts.** When the email came in over IMAP
    (`start-imap`), the reply is APPENDed straight
    into your account's **Drafts** folder, flagged as a draft, so it shows up in
    Gmail / Apple Mail / Outlook ready to review and send, in the same client
-   the message came from. 
+   the message came from.
+3. **mbox source creates a `.eml`.** When the email came from an `.mbox` file, 
+  an `.eml` is written next to the `.txt`.
+   Double-clicking it opens a fully pre-filled reply in your email client,
+   so you are one click from sending.
+
+## CLI (optional)
 
 ```sh
-python -m src.cli start data/inbox && python -m src.cli review   # approvals -> .eml
-python -m src.cli start-imap --days 7 && python -m src.cli review # approvals -> IMAP Drafts
+source venv/bin/activate
+python -m src.cli start [folder]       # process new mbox mail (default data/inbox)
+python -m src.cli start-imap --days 7  # same, from unread IMAP mail
+python -m src.cli review               # approve / edit / reject, most important first
+python -m src.cli reset [-y]           # clear the queue ledgers; -y skips the prompt
 ```
 
-The IMAP APPEND writes to the `Drafts` folder by default; for Gmail set
-`IMAP_DRAFTS_FOLDER=[Gmail]/Drafts`. This is the only write the IMAP layer
-ever makes, and it is APPEND-only, it just adds to your drafts
-folder. The final Send is always done yourself.
+`start`/`start-imap` also take `--limit`, `--anonymizer regex|regex+ner|combined`,
+`--task`, `--config`, and `--queue-dir`; `review` also takes `--queue-dir`,
+`--approved-dir`, `--sessions-dir`, and `--max-chars`. `reset` deletes the
+processed/reviewed ledgers so the next `start` reprocesses everything —
+approved drafts and session logs are kept.
 
 ## Development testing stuff
 
@@ -358,7 +377,7 @@ python -m src.cli process-old data/dev_corpus.mbox --limit 10
 # Present + log only, no approve/reject prompts (good for a quick look or CI)
 python -m src.cli process data/dev_corpus.mbox --limit 3 --no-input
 
-# Pick the anonymizer used for escalations (default: combined = regex + NER)
+# Pick the anonymizer used for escalations (default: combined = regex + NER + coref)
 python -m src.cli process data/dev_corpus.mbox --limit 5 --anonymizer regex
 
 # Reproducible random sample
@@ -389,13 +408,13 @@ python -m src.cli triage-emails data/dev_corpus.mbox --limit 5 --shuffle --seed 
 
 ### preview anonymizer
 
-Shows exactly what would leave the box on escalation; `--anonymizer` picks the
-layer:
+Shows exactly what would leave the box on escalation; `--anonymizer` picks how
+much of the stack runs:
 
 ```sh
 python -m src.cli anonymize-emails data/dev_corpus.mbox --limit 2
 python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer regex --limit 2
-python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer coref --shuffle --seed 42
+python -m src.cli anonymize-emails data/dev_corpus.mbox --anonymizer regex+ner --shuffle --seed 42
 ```
 
 ### Run the test suite

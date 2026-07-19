@@ -47,6 +47,12 @@ def test_system_prompt_demands_placeholder_preservation() -> None:
     assert "EXACTLY" in SYSTEM_PROMPT or "exactly" in SYSTEM_PROMPT
 
 
+def test_system_prompt_explains_linked_pronoun_placeholders() -> None:
+    assert "They_P1" in SYSTEM_PROMPT
+    assert "Their_P1" in SYSTEM_PROMPT
+    assert "same entity" in SYSTEM_PROMPT
+
+
 def test_user_prompt_includes_task_thread_and_email() -> None:
     prompt = _build_user_prompt("the email", "the thread", "Do the thing")
     assert "Task: Do the thing" in prompt

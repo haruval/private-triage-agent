@@ -5,6 +5,7 @@ pytest
 pyyaml
 rich
 fastcoref
+huggingface-hub
 # matplotlib: Pareto frontier plot in scripts/generate_report.py.
 # Use the Agg backend for headless PNG output.
 matplotlib

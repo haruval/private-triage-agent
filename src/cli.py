@@ -46,9 +46,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from email.message import EmailMessage
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -72,8 +72,16 @@ from src.anonymize.ner_anonymizer import CombinedAnonymizer
 from src.anonymize.regex_anonymizer import RegexAnonymizer
 from src.anonymize.rehydrate import rehydrate
 from src.delegate.claude_client import ClaudeClient
-from src.ingestion.imap_loader import append_to_drafts, load_imap_unread
+from src.ingestion.imap_loader import DEFAULT_DRAFTS_FOLDER, load_imap_unread
 from src.ingestion.mbox_loader import Email, load_mbox
+from src.review_actions import (
+    ImapAccountMismatchError,
+    ProcessedEmail,
+    append_session_record,
+    persist_approved,
+    processed_from_record,
+    session_record,
+)
 from src.router.importance import EmailDigest, rank_importance
 from src.router.sensitivity_scorer import EscalationDecision, SensitivityScorer
 from src.triage.classifier import TriageResult, triage
@@ -152,7 +160,9 @@ def _render_email_panel(
     _label("escalate")
     if decision.escalate:
         body.append("true", style="bold red")
-        body.append(f"  (score {decision.score:.2f} — run `process` to delegate)", style="dim")
+        body.append(
+            f"  (score {decision.score:.2f} — run `process` to delegate)", style="dim"
+        )
     else:
         body.append("false", style="dim")
         body.append(f"  (score {decision.score:.2f})", style="dim")
@@ -263,7 +273,9 @@ CLAUDE_SYSTEM_PROMPT = (
     "dates, and other PII have been replaced with proper-noun-shaped "
     "placeholders such as Alex_P1, Acme_O1, Phone_F1, Date_D1. Preserve "
     "every placeholder verbatim in your response — do not invent new "
-    "placeholders, do not paraphrase them, do not strip their suffixes."
+    "placeholders, do not paraphrase them, do not strip their suffixes. "
+    "Linked pronoun placeholders share an entity suffix: Alex_P1, They_P1, "
+    "and Their_P1 all refer to the same entity."
 )
 DEFAULT_PREVIEW_TASK = (
     "Draft a concise reply to the email below. Reply in plain text only."
@@ -275,10 +287,11 @@ _PLACEHOLDER_RE = re.compile(r"[A-Z][a-z]+_[A-Z]\d+")
 def _build_anonymizer(name: str) -> tuple[Any, str]:
     if name == "regex":
         return RegexAnonymizer(), "regex"
-    if name == "combined":
+    if name == "regex+ner":
         return CombinedAnonymizer(), "regex+ner"
-    if name == "coref":
+    if name == "combined":
         from src.anonymize.coref_anonymizer import CorefAnonymizer
+
         return CorefAnonymizer(), "regex+ner+coref"
     raise ValueError(f"unknown anonymizer: {name!r}")
 
@@ -326,7 +339,10 @@ def _highlight_placeholders(text: str) -> Text:
 def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
-    return text[:max_chars].rstrip() + f"\n[… {len(text) - max_chars} more chars truncated]"
+    return (
+        text[:max_chars].rstrip()
+        + f"\n[… {len(text) - max_chars} more chars truncated]"
+    )
 
 
 def _render_anonymize_panel(
@@ -361,7 +377,9 @@ def _render_anonymize_panel(
     body.append("\n\n")
 
     body.append("anonymized message (what Claude would see):\n", style="dim")
-    body.append_text(_highlight_placeholders(_truncate(anonymized_user_message, max_body_chars)))
+    body.append_text(
+        _highlight_placeholders(_truncate(anonymized_user_message, max_body_chars))
+    )
     body.append("\n\n")
 
     body.append("mapping:\n", style="dim")
@@ -471,22 +489,6 @@ DEFAULT_PROCESS_TASK = (
 
 PROVENANCE_STYLE = {"local": "blue", "Claude": "magenta"}
 
-_UNSAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-@dataclass
-class ProcessedEmail:
-    """One email after triage + (optional) escalation, ready to present."""
-
-    email: Email
-    result: TriageResult
-    decision: EscalationDecision
-    draft: str | None
-    provenance: str            # "local" or "Claude"
-    mapping: dict[str, str]    # placeholder -> original (empty unless escalated)
-    claude_used: bool
-    error: str | None          # escalation-path error note, if any
-
 
 def _email_payload(email: Email) -> str:
     """The subject/from/body block that gets anonymized and sent to Claude.
@@ -535,8 +537,7 @@ def _build_processed(
                 claude_used = True
             except Exception as exc:  # network / API / anonymizer — degrade gracefully
                 error = (
-                    f"delegation failed ({type(exc).__name__}: {exc}); "
-                    f"kept local draft"
+                    f"delegation failed ({type(exc).__name__}: {exc}); kept local draft"
                 )
 
     return ProcessedEmail(
@@ -653,149 +654,20 @@ def _edit_draft(draft: str) -> str:
         tmp_path.unlink(missing_ok=True)
 
 
-def _safe_stem(email: Email) -> str:
-    raw = (email.id or "email").strip().strip("<>")
-    stem = _UNSAFE_FILENAME_RE.sub("_", raw).strip("_")
-    return (stem or "email")[:80]
-
-
-def _save_approved_draft(p: ProcessedEmail, draft: str, out_dir: Path) -> Path:
-    """Write an approved draft to ``out_dir``; never overwrites an existing file."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = _safe_stem(p.email)
-    path = out_dir / f"{stem}.txt"
-    n = 2
-    while path.exists():
-        path = out_dir / f"{stem}-{n}.txt"
-        n += 1
-    header = (
-        f"To: {p.email.from_addr or '(unknown)'}\n"
-        f"Subject: Re: {p.email.subject or '(no subject)'}\n"
-        f"X-Draft-Provenance: {p.provenance}\n"
-        f"X-Triage-Category: {p.result.category}\n"
-        f"\n"
-    )
-    path.write_text(header + draft.rstrip() + "\n", encoding="utf-8")
-    return path
-
-
-def _reply_subject(subject: str) -> str:
-    """`Re:`-prefix a subject without doubling an existing one."""
-    subject = (subject or "").strip()
-    if not subject:
-        return "Re: (no subject)"
-    return subject if subject[:3].lower() == "re:" else f"Re: {subject}"
-
-
-def _build_reply_message(p: ProcessedEmail, draft: str) -> EmailMessage:
-    """Build the approved reply as an RFC-5322 message: headers, threading, body.
-
-    Shared by the ``.eml`` export and the IMAP Drafts APPEND. ``To`` is the
-    original sender; ``From`` is filled from IMAP_USER when set, otherwise the
-    mail client supplies it on open. Threading headers are added only when the
-    original carried a real Message-ID (not a synthesized content hash), so
-    replies thread correctly in the recipient's client.
-    """
-    msg = EmailMessage()
-    orig = p.email
-    if orig.from_addr:
-        msg["To"] = orig.from_addr
-    sender = os.environ.get("IMAP_USER", "").strip()
-    if sender:
-        msg["From"] = sender
-    msg["Subject"] = _reply_subject(orig.subject)
-    if orig.id and not orig.id.startswith("<sha1:"):
-        msg["In-Reply-To"] = orig.id
-        existing_refs = (orig.headers.get("References") or "").strip()
-        msg["References"] = f"{existing_refs} {orig.id}".strip()
-    msg["X-Draft-Provenance"] = p.provenance
-    msg["X-Triage-Category"] = p.result.category
-    msg.set_content(draft.rstrip() + "\n")
-    return msg
-
-
-def _save_approved_eml(p: ProcessedEmail, draft: str, out_dir: Path) -> Path:
-    """Write the approved reply as a ``.eml`` that opens pre-filled in a mail client."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = _safe_stem(p.email)
-    path = out_dir / f"{stem}.eml"
-    n = 2
-    while path.exists():
-        path = out_dir / f"{stem}-{n}.eml"
-        n += 1
-    path.write_bytes(_build_reply_message(p, draft).as_bytes())
-    return path
-
-
-def _source_is_imap(source: str) -> bool:
-    """True when an email's source string names an IMAP connection.
-
-    IMAP sources are ``"imap"`` (both ``start-imap`` and ``process --source
-    imap``); mbox sources are ``"mbox:<file>"`` (``start``) or ``"mbox"``
-    (``process``). An empty/unknown source is treated as mbox.
-    """
-    return source.strip().lower().startswith("imap")
-
-
 def _persist_approved(
-    p: ProcessedEmail, draft: str, out_dir: Path, source: str
+    p: ProcessedEmail,
+    draft: str,
+    out_dir: Path,
+    source: str,
+    imap_account: review_queue.ImapAccountRef | None = None,
 ) -> Path:
-    """Persist an approved draft, routing by where the email came from.
-
-    Always writes the plain ``.txt`` (the session-log anchor). Then, so the
-    reply lands somewhere you can actually send it from:
-
-    - **IMAP source** -> APPEND the reply into your Drafts folder, so it shows
-      up ready to send in the same mail client the message came from.
-    - **mbox source** -> write a double-clickable ``.eml`` that opens
-      pre-filled in your default mail client (there is no live mailbox to
-      write a draft into).
-
-    The routed step is best-effort: a failure is reported but never blocks the
-    review, and nothing here ever sends the mail. Returns the ``.txt`` path.
-    """
-    txt_path = _save_approved_draft(p, draft, out_dir)
-    if _source_is_imap(source):
-        try:
-            append_to_drafts(_build_reply_message(p, draft).as_bytes())
-            console.print("  [dim]saved to IMAP Drafts (not sent)[/]")
-        except Exception as exc:
-            console.print(f"  [yellow]could not save to IMAP Drafts: {exc}[/]")
-    else:
-        try:
-            eml_path = _save_approved_eml(p, draft, out_dir)
-            console.print(f"  [dim].eml written to {eml_path}[/]")
-        except Exception as exc:
-            console.print(f"  [yellow]could not write .eml: {exc}[/]")
-    return txt_path
-
-
-def _session_record(
-    p: ProcessedEmail, action: str, saved_path: Path | None
-) -> dict[str, Any]:
-    return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "email_id": p.email.id,
-        "from": p.email.from_addr,
-        "subject": p.email.subject,
-        "category": p.result.category,
-        "confidence": p.result.confidence,
-        "escalate": p.decision.escalate,
-        "score": p.decision.score,
-        "reason": p.decision.reason,
-        "provenance": p.provenance,
-        "claude_used": p.claude_used,
-        "num_placeholders": len(p.mapping),
-        "action": action,
-        "approved_path": str(saved_path) if saved_path else None,
-        "error": p.error,
-    }
-
-
-def _append_session_record(session_path: Path, record: dict[str, Any]) -> None:
-    session_path.parent.mkdir(parents=True, exist_ok=True)
-    with session_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+    """`review_actions.persist_approved` plus console reporting of the outcome."""
+    outcome = persist_approved(p, draft, out_dir, source, imap_account)
+    if outcome.note:
+        console.print(f"  [dim]{outcome.note}[/]")
+    if outcome.warning:
+        console.print(f"  [yellow]{outcome.warning}[/]")
+    return outcome.txt_path
 
 
 def _limit_and_shuffle(
@@ -824,6 +696,20 @@ def _select_emails(
     if shuffle:
         return _limit_and_shuffle(list(load_mbox(mbox_path)), limit, shuffle, seed)
     return list(islice(load_mbox(mbox_path), limit))
+
+
+def _imap_account_from_env() -> review_queue.ImapAccountRef | None:
+    """The currently configured IMAP account as routing metadata, if complete."""
+    host = os.environ.get("IMAP_HOST", "").strip()
+    user = os.environ.get("IMAP_USER", "").strip()
+    if not host or not user:
+        return None
+    drafts_folder = (
+        os.environ.get("IMAP_DRAFTS_FOLDER", "").strip() or DEFAULT_DRAFTS_FOLDER
+    )
+    return review_queue.ImapAccountRef(
+        host=host, user=user, drafts_folder=drafts_folder
+    )
 
 
 def _validate_source_args(args: argparse.Namespace) -> bool:
@@ -895,13 +781,18 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
         f"triage {ollama_client.model})[/]"
     )
     if not interactive:
-        console.print("[dim](non-interactive: presenting + logging only, no prompts)[/]")
+        console.print(
+            "[dim](non-interactive: presenting + logging only, no prompts)[/]"
+        )
     console.print(f"[dim]session log → {session_path}[/]")
     console.print()
 
     emails = _collect_process_emails(args)
     if emails is None:
         return 1
+    # Captured at fetch time so an IMAP approval routes to the account the
+    # mail actually came from, even if settings change mid-review.
+    imap_account = _imap_account_from_env() if args.source == "imap" else None
 
     processed = failed = escalated = approved = 0
     quit_early = False
@@ -915,7 +806,7 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
                 result = triage(email, client=ollama_client)
         except Exception as exc:
             console.print(_render_failure_panel(email, exc))
-            _append_session_record(
+            append_session_record(
                 session_path,
                 {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -945,9 +836,7 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
                     )
 
         verb = "Delegating" if decision.escalate else "Drafting"
-        with console.status(
-            f"[cyan]{verb} [{i}] {subject_preview}", spinner="dots"
-        ):
+        with console.status(f"[cyan]{verb} [{i}] {subject_preview}", spinner="dots"):
             p = _build_processed(
                 email,
                 result,
@@ -964,7 +853,7 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
         if interactive:
             action = _prompt_action(bool(p.draft and p.draft.strip()))
             if action == "quit":
-                _append_session_record(session_path, _session_record(p, "quit", None))
+                append_session_record(session_path, session_record(p, "quit", None))
                 quit_early = True
                 processed += 1
                 break
@@ -972,13 +861,15 @@ def _cmd_process_old(args: argparse.Namespace) -> int:
             if action == "edit":
                 draft_to_save = _edit_draft(draft_to_save)
             if action in ("approve", "edit") and draft_to_save.strip():
-                saved_path = _persist_approved(p, draft_to_save, out_dir, args.source)
+                saved_path = _persist_approved(
+                    p, draft_to_save, out_dir, args.source, imap_account
+                )
                 approved += 1
                 console.print(f"  [green]saved →[/] {saved_path}")
             elif action == "reject":
                 console.print("  [dim]rejected — nothing saved[/]")
 
-        _append_session_record(session_path, _session_record(p, action, saved_path))
+        append_session_record(session_path, session_record(p, action, saved_path))
         processed += 1
         console.print()
 
@@ -1135,13 +1026,18 @@ def _cmd_process(args: argparse.Namespace) -> int:
         f"triage {ollama_client.model}, background processing)[/]"
     )
     if not interactive:
-        console.print("[dim](non-interactive: presenting + logging only, no prompts)[/]")
+        console.print(
+            "[dim](non-interactive: presenting + logging only, no prompts)[/]"
+        )
     console.print(f"[dim]session log → {session_path}[/]")
     console.print()
 
     emails = _collect_process_emails(args)
     if emails is None:
         return 1
+    # Captured at fetch time so an IMAP approval routes to the account the
+    # mail actually came from, even if settings change mid-review.
+    imap_account = _imap_account_from_env() if args.source == "imap" else None
 
     outcomes: queue.Queue[_ProcessOutcome | None] = queue.Queue()
     stop = threading.Event()
@@ -1177,7 +1073,7 @@ def _cmd_process(args: argparse.Namespace) -> int:
         if item.processed is None:
             assert item.error is not None
             console.print(_render_failure_panel(item.email, item.error))
-            _append_session_record(
+            append_session_record(
                 session_path,
                 {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1204,7 +1100,7 @@ def _cmd_process(args: argparse.Namespace) -> int:
             action = _prompt_action(bool(p.draft and p.draft.strip()))
             if action == "quit":
                 stop.set()
-                _append_session_record(session_path, _session_record(p, "quit", None))
+                append_session_record(session_path, session_record(p, "quit", None))
                 quit_early = True
                 processed += 1
                 break
@@ -1212,13 +1108,15 @@ def _cmd_process(args: argparse.Namespace) -> int:
             if action == "edit":
                 draft_to_save = _edit_draft(draft_to_save)
             if action in ("approve", "edit") and draft_to_save.strip():
-                saved_path = _persist_approved(p, draft_to_save, out_dir, args.source)
+                saved_path = _persist_approved(
+                    p, draft_to_save, out_dir, args.source, imap_account
+                )
                 approved += 1
                 console.print(f"  [green]saved →[/] {saved_path}")
             elif action == "reject":
                 console.print("  [dim]rejected — nothing saved[/]")
 
-        _append_session_record(session_path, _session_record(p, action, saved_path))
+        append_session_record(session_path, session_record(p, action, saved_path))
         processed += 1
         console.print()
 
@@ -1239,22 +1137,10 @@ def _cmd_process(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _processed_from_record(rec: review_queue.QueueRecord) -> ProcessedEmail:
-    """Rebuild the panel-ready ProcessedEmail from a stored queue record."""
-    return ProcessedEmail(
-        email=rec.email,
-        result=rec.result,
-        decision=rec.decision,
-        draft=rec.draft,
-        provenance=rec.provenance,
-        mapping=rec.mapping,
-        claude_used=rec.claude_used,
-        error=rec.error,
-    )
-
-
 def _format_importance(importance: float) -> str:
-    return f"{importance:.0f}" if float(importance).is_integer() else f"{importance:.1f}"
+    return (
+        f"{importance:.0f}" if float(importance).is_integer() else f"{importance:.1f}"
+    )
 
 
 def _print_queue_summary(pending: list[review_queue.QueueRecord]) -> None:
@@ -1310,6 +1196,7 @@ def _run_start_pipeline(
     sources: dict[str, str],
     args: argparse.Namespace,
     queue_dir: Path,
+    imap_accounts: dict[str, review_queue.ImapAccountRef] | None = None,
 ) -> int:
     """Process ``emails`` into the queue with a progress bar, rank, summarize.
 
@@ -1321,6 +1208,11 @@ def _run_start_pipeline(
     """
     failed = 0
     done: list[_ProcessOutcome] = []
+    # Optional (done, total) hook so the web API can publish real progress;
+    # terminal runs have no attribute and rely on the Rich bar alone.
+    progress_cb: Callable[[int, int], None] | None = getattr(
+        args, "progress_cb", None
+    )
 
     if emails:
         try:
@@ -1361,6 +1253,9 @@ def _run_start_pipeline(
             TimeElapsedColumn(),
             console=console,
         )
+        if progress_cb is not None:
+            progress_cb(0, len(emails))
+        completed = 0
         with progress:
             task_id = progress.add_task("Processing…", total=len(emails))
             while True:
@@ -1384,6 +1279,9 @@ def _run_start_pipeline(
                 progress.update(
                     task_id, advance=1, description=f"[cyan]{subject_preview}"
                 )
+                completed += 1
+                if progress_cb is not None:
+                    progress_cb(completed, len(emails))
             progress.update(task_id, description="[green]processing done")
 
         if done:
@@ -1438,6 +1336,7 @@ def _run_start_pipeline(
                         ranked_by=ranking.ranked_by,
                         source=sources.get(o.email.id, ""),
                         processed_at=now,
+                        imap_account=(imap_accounts or {}).get(o.email.id),
                     )
                 )
             review_queue.append_records(queue_dir, new_records)
@@ -1475,7 +1374,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
         return 1
 
     queue_dir = Path(args.queue_dir)
-    already = review_queue.processed_ids(queue_dir)
+    already = review_queue.processed_record_ids(queue_dir)
 
     emails: list[Email] = []
     sources: dict[str, str] = {}
@@ -1483,7 +1382,8 @@ def _cmd_start(args: argparse.Namespace) -> int:
     with console.status("[cyan]Scanning mbox files…", spinner="dots"):
         for mbox_file in mbox_files:
             for email in load_mbox(mbox_file):
-                if email.id in already or email.id in sources:
+                record_id = review_queue.compute_record_id("mbox", None, email.id)
+                if record_id in already or email.id in sources:
                     skipped += 1
                     continue
                 sources[email.id] = f"mbox:{mbox_file.name}"
@@ -1503,6 +1403,7 @@ def _cmd_start(args: argparse.Namespace) -> int:
 def _cmd_start_imap(args: argparse.Namespace) -> int:
     """Process unread IMAP mail into the queue (read-only connection)."""
     queue_dir = Path(args.queue_dir)
+    account = _imap_account_from_env()
     try:
         with console.status(
             f"[cyan]Fetching unread (last {args.days} days) via IMAP…",
@@ -1513,16 +1414,59 @@ def _cmd_start_imap(args: argparse.Namespace) -> int:
         console.print(f"[red]IMAP error:[/] {exc}")
         return 1
 
-    already = review_queue.processed_ids(queue_dir)
-    emails = [e for e in fetched if e.id not in already]
+    # Dedupe on the account-scoped record id: the same Message-ID already
+    # processed from a *different* account (or an mbox export) is still new.
+    already = review_queue.processed_record_ids(queue_dir)
+    emails = [
+        e
+        for e in fetched
+        if review_queue.compute_record_id("imap", account, e.id) not in already
+    ]
     if args.limit is not None:
         emails = emails[: args.limit]
     sources = {e.id: "imap" for e in emails}
+    imap_accounts = {e.id: account for e in emails} if account else None
     console.print(
         f"[dim]IMAP returned {len(fetched)} unread email(s); "
         f"{len(emails)} new to process[/]"
     )
-    return _run_start_pipeline(emails, sources, args, queue_dir)
+    return _run_start_pipeline(emails, sources, args, queue_dir, imap_accounts)
+
+
+def run_queued_pipeline(
+    *,
+    source: str,
+    inbox_dir: Path,
+    queue_dir: Path,
+    days: int = 7,
+    limit: int | None = None,
+    anonymizer: str = "combined",
+    task: str | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> int:
+    """Run the queue-producing pipeline for the CLI or local web API.
+
+    ``limit``, ``anonymizer``, and ``task`` mirror the ``start``/``start-imap``
+    flags; callers (the web API) validate them before they get here.
+    ``progress`` is called with (emails done, total) as the batch advances.
+    """
+    if anonymizer not in ("regex", "regex+ner", "combined"):
+        raise ValueError(f"unknown anonymizer: {anonymizer!r}")
+    args = argparse.Namespace(
+        limit=limit,
+        anonymizer=anonymizer,
+        task=task or DEFAULT_PROCESS_TASK,
+        config=None,
+        queue_dir=str(queue_dir),
+        folder=str(inbox_dir),
+        days=days,
+        progress_cb=progress,
+    )
+    if source == "mbox":
+        return _cmd_start(args)
+    if source == "imap":
+        return _cmd_start_imap(args)
+    raise ValueError(f"unknown pipeline source: {source!r}")
 
 
 def _cmd_reset(args: argparse.Namespace) -> int:
@@ -1562,8 +1506,7 @@ def _cmd_reset(args: argparse.Namespace) -> int:
     for path in existing:
         path.unlink()
     console.print(
-        f"[green]Queue reset[/] — deleted "
-        f"{', '.join(str(p) for p in existing)}"
+        f"[green]Queue reset[/] — deleted {', '.join(str(p) for p in existing)}"
     )
     return 0
 
@@ -1593,9 +1536,11 @@ def _cmd_review(args: argparse.Namespace) -> int:
     reviewed = approved = 0
     quit_early = False
     for i, rec in enumerate(pending, start=1):
-        p = _processed_from_record(rec)
+        p = processed_from_record(rec)
         header = Text(f"[{i}/{len(pending)}]  ", style="bold")
-        header.append(f"importance {_format_importance(rec.importance)}", style="bold cyan")
+        header.append(
+            f"importance {_format_importance(rec.importance)}", style="bold cyan"
+        )
         if rec.importance_reason:
             header.append(f" — {rec.importance_reason}", style="dim")
         console.print(header)
@@ -1606,7 +1551,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
         except EOFError:  # piped stdin ran dry — treat like quit
             action = "quit"
         if action == "quit":
-            _append_session_record(session_path, _session_record(p, "quit", None))
+            append_session_record(session_path, session_record(p, "quit", None))
             quit_early = True
             break
 
@@ -1615,14 +1560,23 @@ def _cmd_review(args: argparse.Namespace) -> int:
         if action == "edit":
             draft_to_save = _edit_draft(draft_to_save)
         if action in ("approve", "edit") and draft_to_save.strip():
-            saved_path = _persist_approved(p, draft_to_save, out_dir, rec.source)
+            try:
+                saved_path = _persist_approved(
+                    p, draft_to_save, out_dir, rec.source, rec.imap_account
+                )
+            except ImapAccountMismatchError as exc:
+                console.print(f"  [yellow]{exc}[/]")
+                console.print()
+                continue
             approved += 1
             console.print(f"  [green]saved →[/] {saved_path}")
         elif action == "reject":
             console.print("  [dim]rejected — nothing saved[/]")
 
-        review_queue.append_reviewed(queue_dir, rec.email.id, action, saved_path)
-        _append_session_record(session_path, _session_record(p, action, saved_path))
+        review_queue.append_reviewed(
+            queue_dir, rec.record_id, rec.email.id, action, saved_path
+        )
+        append_session_record(session_path, session_record(p, action, saved_path))
         reviewed += 1
         console.print()
 
@@ -1707,9 +1661,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     anon_parser.add_argument(
         "--anonymizer",
-        choices=["regex", "combined", "coref"],
+        choices=["regex", "regex+ner", "combined"],
         default="combined",
-        help="Anonymization strategy (default: combined = regex + NER)",
+        help="Anonymization strategy (default: combined = regex + NER + coref)",
     )
     anon_parser.add_argument(
         "--task",
@@ -1769,9 +1723,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         p.add_argument(
             "--anonymizer",
-            choices=["regex", "combined", "coref"],
+            choices=["regex", "regex+ner", "combined"],
             default="combined",
-            help="Anonymization strategy for escalations (default: combined = regex + NER)",
+            help="Anonymization strategy for escalations "
+            "(default: combined = regex + NER + coref)",
         )
         p.add_argument(
             "--task",
@@ -1860,9 +1815,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         p.add_argument(
             "--anonymizer",
-            choices=["regex", "combined", "coref"],
+            choices=["regex", "regex+ner", "combined"],
             default="combined",
-            help="Anonymization strategy for escalations (default: combined = regex + NER)",
+            help="Anonymization strategy for escalations "
+            "(default: combined = regex + NER + coref)",
         )
         p.add_argument(
             "--task",

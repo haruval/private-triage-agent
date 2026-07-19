@@ -1,0 +1,15 @@
+{
+  "repo_id": "biu-nlp/f-coref",
+  "revision": "e91dfff12879495d882ba9460d0c5d5dd44ade59",
+  "committed_at": "2022-11-28T11:35:52+00:00",
+  "reviewed_at": "2026-07-16",
+  "files": {
+    "config.json": "2d96a29d2ebd497d34580594f40ded241440411bcd83885b89d8fbb86189bc3b",
+    "merges.txt": "fe36cab26d4f4421ed725e10a2e9ddb7f799449c603a96e7f29b5a3c82a95862",
+    "pytorch_model.bin": "30ea6efe2bce49a857fe8aba41dcfe28b4147f77e3dec9f14100950bf4de1aa5",
+    "special_tokens_map.json": "378eb3bf733eb16e65792d7e3fda5b8a4631387ca04d2015199c4d4f22ae554d",
+    "tokenizer.json": "4b0608f76bb14eda47a3492aa22b0bdf167922aada04249816950b0993364c2a",
+    "tokenizer_config.json": "bb1975e5fd1f387d961e64ea6b674df48316f1de69169047eca851817e917ae1",
+    "vocab.json": "ed19656ea1707df69134c4af35c8ceda2cc9860bf2c3495026153a133670ab5e"
+  }
+}

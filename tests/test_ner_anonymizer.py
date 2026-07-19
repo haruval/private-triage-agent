@@ -209,6 +209,75 @@ def test_combined_detect_offsets_are_in_original_text(
         )
 
 
+def test_combined_detect_offsets_valid_on_whole_corpus(
+    combined_anonymizer: CombinedAnonymizer,
+) -> None:
+    """The slice-equals-value invariant must hold on every corpus example."""
+    for ex in load_corpus():
+        for d in combined_anonymizer.detect(ex.text):
+            assert ex.text[d.start:d.end] == d.value, (
+                f"offset mismatch for {d} in {ex.text!r}"
+            )
+
+
+class _SubstringNER:
+    """Fake NER tagging the standalone token 'Ann' — a value that also
+    appears earlier as a substring of 'Announcement'."""
+
+    def detect(self, text: str) -> list[Detection]:
+        import re
+
+        return [
+            Detection(m.start(), m.end(), "person", m.group(0))
+            for m in re.finditer(r"\bAnn\b", text)
+        ]
+
+
+def test_combined_detect_anchors_repeated_value_by_offset() -> None:
+    """Regression: NER hits were re-anchored by value search, so 'Ann' was
+    reported inside 'Announcement' instead of at its true span."""
+    text = "Announcement: contact Ann today."
+    anon = CombinedAnonymizer(regex=RegexAnonymizer(), ner=_SubstringNER())
+
+    dets = anon.detect(text)
+
+    assert [(d.start, d.end, d.type, d.value) for d in dets] == [
+        (22, 25, "person", "Ann")
+    ]
+
+
+class _PlaceholderSpanNER:
+    """Fake NER tagging a span that contains a regex money placeholder."""
+
+    def detect(self, text: str) -> list[Detection]:
+        import re
+
+        return [
+            Detection(m.start(), m.end(), "money", m.group(0))
+            for m in re.finditer(r"Amount_M\d+ million USD", text)
+        ]
+
+
+def test_combined_covers_ner_span_containing_regex_placeholder() -> None:
+    """Regression: an NER span swallowing a regex placeholder was dropped by
+    detect() and produced a chained mapping value from anonymize(); it must
+    map to the full original span and rehydrate in one step."""
+    from src.anonymize.rehydrate import rehydrate
+
+    text = "We agreed on $2.5 million USD for the retainer."
+    anon = CombinedAnonymizer(regex=RegexAnonymizer(), ner=_PlaceholderSpanNER())
+
+    dets = anon.detect(text)
+    assert [(d.start, d.end, d.type, d.value) for d in dets] == [
+        (13, 29, "money", "$2.5 million USD")
+    ]
+
+    out, mapping = anon.anonymize(text)
+    assert out == "We agreed on Amount_M1 for the retainer."
+    assert mapping == {"Amount_M1": "$2.5 million USD"}
+    assert rehydrate(out, mapping) == text
+
+
 # ---------------------------------------------------------------------------
 # Cross-strategy precision/recall/F1 on the eval corpus
 # ---------------------------------------------------------------------------

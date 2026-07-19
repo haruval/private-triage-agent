@@ -1,0 +1,1003 @@
+/* Theme + layout for the review UI.
+ *
+ * Material Web components are themed through --md-sys-color-* tokens in a
+ * vibrant Material You palette: a pastel blue surface with a vivid blue
+ * primary and a complementary pastel green secondary (the tonal top-bar
+ * buttons). Dark mode is the same palette as dark pastels — still colorful,
+ * switched on prefers-color-scheme. The --app-* variables carry the terminal
+ * UI's semantic colors (category, provenance, importance, confidence) tuned
+ * per scheme. System fonts only — nothing external is ever fetched. */
+
+:root {
+  --md-ref-typeface-brand: ui-sans-serif, system-ui, -apple-system, 'Segoe UI',
+    Roboto, sans-serif;
+  --md-ref-typeface-plain: var(--md-ref-typeface-brand);
+  --app-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Shared shape for side-by-side action pairs: pill ends face out, compact
+     rounded rectangles face in. The pill radius must be exactly half the
+     40px button height: anything larger (e.g. 999px) makes the browser
+     rescale ALL corners of the box uniformly, flattening the inner radius
+     to near zero. */
+  --pill-pair-outer-radius: 20px;
+  --pill-pair-inner-radius: 10px;
+
+  /* Light scheme (default) — vivid blue primary on a pastel blue surface,
+     pastel green secondary. */
+  --md-sys-color-primary: #2b5cd9;
+  --md-sys-color-on-primary: #ffffff;
+  --md-sys-color-primary-container: #c5d5ff;
+  --md-sys-color-on-primary-container: #002a77;
+  --md-sys-color-secondary: #266b41;
+  --md-sys-color-on-secondary: #ffffff;
+  --md-sys-color-secondary-container: #b4ecc6;
+  --md-sys-color-on-secondary-container: #002111;
+  --md-sys-color-tertiary: #6a4fa3;
+  --md-sys-color-on-tertiary: #ffffff;
+  --md-sys-color-tertiary-container: #e7dcff;
+  --md-sys-color-on-tertiary-container: #241457;
+  --md-sys-color-error: #ba1a1a;
+  --md-sys-color-on-error: #ffffff;
+  --md-sys-color-error-container: #ffdad6;
+  --md-sys-color-on-error-container: #410002;
+  --md-sys-color-surface: #d8e5fb;
+  --md-sys-color-on-surface: #121c2e;
+  --md-sys-color-surface-variant: #d5e0f5;
+  --md-sys-color-on-surface-variant: #43506b;
+  --md-sys-color-surface-container-lowest: #ffffff;
+  --md-sys-color-surface-container-low: #eef4ff;
+  --md-sys-color-surface-container: #e4edff;
+  --md-sys-color-surface-container-high: #dae6fd;
+  --md-sys-color-surface-container-highest: #cfdef9;
+  --md-sys-color-outline: #6b7a9f;
+  --md-sys-color-outline-variant: #b9c8e8;
+  --md-sys-color-inverse-surface: #2a3247;
+  --md-sys-color-inverse-on-surface: #eef1fb;
+  --md-sys-color-inverse-primary: #b1c5ff;
+  --md-sys-color-scrim: #000000;
+  --md-sys-color-shadow: #000000;
+
+  /* App palette (chips, badges, bars) — light variants. */
+  --app-cat-action-bg: #f3e08a;
+  --app-cat-action-fg: #4d3c00;
+  --app-cat-reply-bg: #b8ebf5;
+  --app-cat-reply-fg: #004e5c;
+  --app-cat-fyi-bg: #c9dcff;
+  --app-cat-fyi-fg: #0842a0;
+  --app-cat-spam-bg: #ffd8d4;
+  --app-cat-spam-fg: #8c1d18;
+  --app-cat-unclear-bg: #f8d8f0;
+  --app-cat-unclear-fg: #71356b;
+  --app-cat-other-bg: #dde7f8;
+  --app-cat-other-fg: #43506b;
+  --app-prov-local-bg: #c9dcff;
+  --app-prov-local-fg: #0842a0;
+  --app-prov-claude-bg: #e9ddff;
+  --app-prov-claude-fg: #4f378a;
+  --app-green: #2e7d32;
+  --app-amber: #9a6a00;
+  --app-red: #c62828;
+  --app-warning-fg: #7a5900;
+
+  /* Expressive section colors. Large regions use closely related pastels
+     instead of divider lines, while nested content gets its own soft tone. */
+  --app-canvas: #e3e5fa;
+  --app-topbar: #f4effa;
+  --app-queue: #fffefe;
+  --app-queue-panel: #f1eafa;
+  --app-row: #f6eff8;
+  --app-detail: #fffefe;
+  --app-group-message: #f7f0fa;
+  --app-group-triage: #eaf6ee;
+  --app-group-routing: #fff3df;
+  --app-group-draft: #eaf3ff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Dark pastels of the light palette — muted, still colorful. */
+    --md-sys-color-primary: #b1c5ff;
+    --md-sys-color-on-primary: #0c2d6f;
+    --md-sys-color-primary-container: #2e4a95;
+    --md-sys-color-on-primary-container: #dbe4ff;
+    --md-sys-color-secondary: #99d8ab;
+    --md-sys-color-on-secondary: #003920;
+    --md-sys-color-secondary-container: #2a5138;
+    --md-sys-color-on-secondary-container: #b4ecc6;
+    --md-sys-color-tertiary: #cfbcff;
+    --md-sys-color-on-tertiary: #3b2870;
+    --md-sys-color-tertiary-container: #524084;
+    --md-sys-color-on-tertiary-container: #e7dcff;
+    --md-sys-color-error: #ffb4ab;
+    --md-sys-color-on-error: #690005;
+    --md-sys-color-error-container: #93000a;
+    --md-sys-color-on-error-container: #ffdad6;
+    --md-sys-color-surface: #131926;
+    --md-sys-color-on-surface: #e1e6f2;
+    --md-sys-color-surface-variant: #3f4c68;
+    --md-sys-color-on-surface-variant: #bfcbe6;
+    --md-sys-color-surface-container-lowest: #0e1420;
+    --md-sys-color-surface-container-low: #1a2133;
+    --md-sys-color-surface-container: #1f2739;
+    --md-sys-color-surface-container-high: #29334b;
+    --md-sys-color-surface-container-highest: #333e59;
+    --md-sys-color-outline: #8b97b8;
+    --md-sys-color-outline-variant: #43506b;
+    --md-sys-color-inverse-surface: #e1e6f2;
+    --md-sys-color-inverse-on-surface: #2a3247;
+    --md-sys-color-inverse-primary: #2b5cd9;
+
+    --app-cat-action-bg: #574400;
+    --app-cat-action-fg: #f8e59a;
+    --app-cat-reply-bg: #00566b;
+    --app-cat-reply-fg: #c2eef8;
+    --app-cat-fyi-bg: #1c3f78;
+    --app-cat-fyi-fg: #d3e3fd;
+    --app-cat-spam-bg: #7a2d26;
+    --app-cat-spam-fg: #ffdad6;
+    --app-cat-unclear-bg: #663061;
+    --app-cat-unclear-fg: #fadcf3;
+    --app-cat-other-bg: #333e59;
+    --app-cat-other-fg: #bfcbe6;
+    --app-prov-local-bg: #1c3f78;
+    --app-prov-local-fg: #d3e3fd;
+    --app-prov-claude-bg: #47357c;
+    --app-prov-claude-fg: #e9ddff;
+    --app-green: #8fd694;
+    --app-amber: #ffc266;
+    --app-red: #f2a09a;
+    --app-warning-fg: #ffd54f;
+    --app-canvas: #151827;
+    --app-topbar: #292437;
+    --app-queue: #221f2d;
+    --app-queue-panel: #292238;
+    --app-row: #2e2939;
+    --app-detail: #1c202c;
+    --app-group-message: #30283a;
+    --app-group-triage: #203329;
+    --app-group-routing: #392f20;
+    --app-group-draft: #202d42;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--app-canvas);
+  color: var(--md-sys-color-on-surface);
+  font-family: var(--md-ref-typeface-plain);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+/* Material Web currently ships the baseline menu on the web. Bring selects
+   closer to the M3 Expressive vertical-menu treatment: a rounder anchor and
+   menu surface, inset pill-shaped rows, and a tertiary selected state. */
+md-outlined-select {
+  --md-outlined-select-text-field-container-shape: 16px;
+  --md-menu-container-shape: 20px;
+  --md-menu-container-color: var(--md-sys-color-surface-container-lowest);
+  --md-menu-container-elevation: 3;
+}
+
+md-outlined-select md-select-option {
+  margin: 3px 8px;
+  border-radius: 14px;
+  --md-menu-item-selected-container-color: var(--md-sys-color-tertiary-container);
+  --md-menu-item-selected-label-text-color: var(--md-sys-color-on-tertiary-container);
+}
+
+code {
+  font-family: var(--app-mono);
+  font-size: 0.92em;
+}
+
+.dim {
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+/* ---- shell -------------------------------------------------------------- */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--app-canvas);
+}
+
+.topbar {
+  --topbar-action-corner-radius: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 21px 28px 9px;
+  background: var(--app-canvas);
+  flex: none;
+}
+
+/* The navigation background ends on a flat horizontal edge. Content cards
+   keep their own radii without changing the navbar silhouette. */
+.app-body {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--app-canvas);
+}
+
+/* The title stays left; margin-right: auto pushes the action buttons to the
+   right edge of the topbar. */
+.app-title {
+  margin-right: auto;
+  color: var(--md-sys-color-primary);
+  font-size: 24px;
+  line-height: 30px;
+  font-weight: 650;
+}
+
+/* Keep primary actions aligned with the queue rows' 12px corner radius. */
+.app-action-shape {
+  --md-filled-button-container-shape: 12px;
+  --md-filled-tonal-button-container-shape: 12px;
+  --md-outlined-button-container-shape: 12px;
+  --md-text-button-container-shape: 12px;
+}
+
+/* Preserve the tonal hover tint without Material's hover elevation. */
+.flat-tonal-action {
+  --md-filled-tonal-button-hover-container-elevation: 0;
+}
+
+/* Navbar actions are slightly larger than the review controls below. */
+.topbar > md-filled-tonal-button {
+  --md-filled-tonal-button-container-height: 44px;
+  --md-filled-tonal-button-label-text-size: 15px;
+}
+
+/* Buttons that read as a coordinated pair (Upload/Connect, Approve/Reject):
+   pill ends face out, rounded-rectangle ends face in. Shape tokens live on
+   :root — see the note there about the 40px height constraint. */
+.pill-pair-start {
+  --md-filled-tonal-button-container-shape-start-start: var(--pill-pair-outer-radius);
+  --md-filled-tonal-button-container-shape-start-end: var(--pill-pair-inner-radius);
+  --md-filled-tonal-button-container-shape-end-end: var(--pill-pair-inner-radius);
+  --md-filled-tonal-button-container-shape-end-start: var(--pill-pair-outer-radius);
+}
+
+.pill-pair-end {
+  --md-filled-tonal-button-container-shape-start-start: var(--pill-pair-inner-radius);
+  --md-filled-tonal-button-container-shape-start-end: var(--pill-pair-outer-radius);
+  --md-filled-tonal-button-container-shape-end-end: var(--pill-pair-outer-radius);
+  --md-filled-tonal-button-container-shape-end-start: var(--pill-pair-inner-radius);
+  margin-inline-start: -4px;
+}
+
+.topbar-options-action {
+  --md-filled-tonal-button-container-shape: var(--topbar-action-corner-radius);
+  --md-filled-tonal-button-leading-space: 12px;
+  --md-filled-tonal-button-trailing-space: 12px;
+  --md-filled-tonal-button-with-leading-icon-leading-space: 12px;
+  --md-filled-tonal-button-with-leading-icon-trailing-space: 12px;
+  gap: 0;
+  width: 52px;
+  height: 44px;
+  min-width: 52px;
+  max-width: 52px;
+}
+
+.settings-icon {
+  width: 24px;
+  height: 24px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .settings-icon {
+    filter: invert(1);
+  }
+}
+
+.api-error {
+  padding: 8px 16px;
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+  flex: none;
+}
+
+.processing-banner {
+  display: grid;
+  grid-template-columns: max-content minmax(160px, 360px) 1fr;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  flex: none;
+}
+
+.processing-banner md-linear-progress {
+  width: 100%;
+  --md-linear-progress-active-indicator-color: var(--md-sys-color-secondary);
+}
+
+/* Shown instead of the bar while the batch total is still unknown
+   (mbox scan / IMAP fetch); sized to fit the one-line banner. */
+.processing-banner md-circular-progress {
+  justify-self: start;
+  --md-circular-progress-size: 28px;
+  --md-circular-progress-active-indicator-color: var(--md-sys-color-secondary);
+}
+
+.main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(360px, 5fr) 7fr;
+  gap: 12px;
+  padding: 12px;
+  min-height: 0;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  padding: 24px;
+}
+
+/* ---- queue list (left) ---------------------------------------------------- */
+
+.queue-pane {
+  overflow-y: auto;
+  background: var(--app-queue-panel);
+  border-radius: 22px;
+  min-height: 0;
+}
+
+.queue-title {
+  padding: 20px 20px 10px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.queue-list {
+  --md-list-container-color: transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 12px 16px;
+}
+
+.queue-row {
+  background: var(--app-row);
+  border-radius: 14px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.queue-row.selected {
+  --md-list-item-label-text-color: var(--md-sys-color-on-primary-container);
+  --md-list-item-container-color: var(--md-sys-color-primary-container);
+  background: var(--md-sys-color-primary-container);
+}
+
+.row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.row-index {
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: var(--app-mono);
+  font-size: 12px;
+  min-width: 1.4em;
+  text-align: right;
+}
+
+.row-subject {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px 0 4px;
+}
+
+.row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.row-summary {
+  color: var(--md-sys-color-on-surface);
+}
+
+.row-item {
+  color: var(--md-sys-color-on-surface-variant);
+  padding-left: 8px;
+}
+
+.row-reason {
+  color: var(--md-sys-color-on-surface-variant);
+  font-style: italic;
+}
+
+/* ---- chips ---------------------------------------------------------------- */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--app-cat-other-bg);
+  color: var(--app-cat-other-fg);
+}
+
+.importance-circle {
+  inline-size: 24px;
+  block-size: 24px;
+  flex: none;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.chip-imp-high {
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+}
+
+.chip-imp-mid {
+  background: var(--app-cat-action-bg);
+  color: var(--app-cat-action-fg);
+}
+
+.chip-imp-low {
+  background: var(--app-cat-other-bg);
+  color: var(--app-cat-other-fg);
+}
+
+.chip-escalated {
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+}
+
+.cat-action {
+  background: var(--app-cat-action-bg);
+  color: var(--app-cat-action-fg);
+}
+
+.cat-reply {
+  background: var(--app-cat-reply-bg);
+  color: var(--app-cat-reply-fg);
+}
+
+.cat-fyi {
+  background: var(--app-cat-fyi-bg);
+  color: var(--app-cat-fyi-fg);
+}
+
+.cat-spam {
+  background: var(--app-cat-spam-bg);
+  color: var(--app-cat-spam-fg);
+}
+
+.cat-unclear {
+  background: var(--app-cat-unclear-bg);
+  color: var(--app-cat-unclear-fg);
+}
+
+.cat-other {
+  background: var(--app-cat-other-bg);
+  color: var(--app-cat-other-fg);
+}
+
+.prov-local {
+  background: var(--app-prov-local-bg);
+  color: var(--app-prov-local-fg);
+}
+
+.prov-claude {
+  background: var(--app-prov-claude-bg);
+  color: var(--app-prov-claude-fg);
+}
+
+/* ---- detail panel (right) --------------------------------------------------- */
+
+.detail-pane {
+  overflow-y: auto;
+  padding: 18px;
+  border-radius: 22px;
+  background: var(--app-detail);
+  min-height: 0;
+}
+
+.detail-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.detail-count {
+  font-family: var(--app-mono);
+  font-weight: 700;
+}
+
+.panel {
+  padding: 0;
+  background: transparent;
+  color: var(--md-sys-color-on-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.detail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border-radius: 16px;
+}
+
+.message-group {
+  background: var(--app-group-message);
+}
+
+.triage-group {
+  background: var(--app-group-triage);
+}
+
+.routing-group {
+  background: var(--app-group-routing);
+}
+
+.draft-group {
+  background: var(--app-group-draft);
+}
+
+.panel-title {
+  margin: 0 0 2px;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 10px;
+  align-items: baseline;
+}
+
+/* A lone row with nothing below to align with hugs its label instead. */
+.kv-tight {
+  grid-template-columns: auto 1fr;
+}
+
+.k {
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: var(--app-mono);
+  font-size: 12px;
+}
+
+.section-label {
+  color: var(--md-sys-color-on-surface-variant);
+  font-family: var(--app-mono);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.original-body {
+  margin: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-lowest) 78%, transparent);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--app-mono);
+  font-size: 12.5px;
+  max-height: 38vh;
+  overflow-y: auto;
+}
+
+.cat-text {
+  background: none;
+  padding: 0;
+  font-weight: 700;
+}
+
+.cat-text.cat-action { color: var(--app-cat-action-fg); }
+.cat-text.cat-reply { color: var(--app-cat-reply-fg); }
+.cat-text.cat-fyi { color: var(--app-cat-fyi-fg); }
+.cat-text.cat-spam { color: var(--app-cat-spam-fg); }
+.cat-text.cat-unclear { color: var(--app-cat-unclear-fg); }
+.cat-text.cat-other { color: var(--app-cat-other-fg); }
+
+.conf {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.conf md-linear-progress {
+  width: 180px;
+}
+
+.conf.conf-high md-linear-progress {
+  --md-linear-progress-active-indicator-color: var(--app-green);
+}
+
+.conf.conf-mid md-linear-progress {
+  --md-linear-progress-active-indicator-color: var(--app-amber);
+}
+
+.conf.conf-low md-linear-progress {
+  --md-linear-progress-active-indicator-color: var(--app-red);
+}
+
+.conf-value {
+  font-family: var(--app-mono);
+  font-size: 12px;
+}
+
+.action-items {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.escalate-true {
+  color: var(--app-red);
+  font-weight: 700;
+}
+
+.escalate-false {
+  color: var(--app-green);
+  font-weight: 600;
+}
+
+.warning-note {
+  color: var(--app-warning-fg);
+}
+
+.draft-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.edited-hint {
+  font-style: italic;
+  font-size: 12px;
+}
+
+.draft-field {
+  width: 100%;
+  --md-outlined-text-field-input-text-font: var(--app-mono);
+  --md-outlined-text-field-input-text-size: 13px;
+}
+
+.no-draft {
+  font-style: italic;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.actions-hint {
+  font-size: 12px;
+}
+
+/* Reject is visually distinct from Approve with the theme's pastel-purple pair. */
+.reject-action {
+  --md-filled-tonal-button-container-color: var(--md-sys-color-tertiary-container);
+  --md-filled-tonal-button-label-text-color: var(--md-sys-color-on-tertiary-container);
+  --md-filled-tonal-button-focus-label-text-color: var(--md-sys-color-on-tertiary-container);
+  --md-filled-tonal-button-hover-label-text-color: var(--md-sys-color-on-tertiary-container);
+  --md-filled-tonal-button-pressed-label-text-color: var(--md-sys-color-on-tertiary-container);
+  --md-filled-tonal-button-hover-state-layer-color: var(--md-sys-color-on-tertiary-container);
+  --md-filled-tonal-button-pressed-state-layer-color: var(--md-sys-color-on-tertiary-container);
+}
+
+/* ---- settings ---------------------------------------------------------------- */
+
+.settings-pane {
+  overflow-y: auto;
+  padding: 20px 24px;
+  width: min(560px, 100%);
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.settings-pane-embedded {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+}
+
+/* Override the modal's generic paragraph reset and clear the select's label. */
+.options-card .settings-pane-embedded .settings-warning {
+  margin: 10px 0 28px;
+}
+
+.settings-intro {
+  margin: 4px 0 0;
+}
+
+.settings-warning {
+  margin: 10px 0 18px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--app-cat-action-bg);
+  color: var(--app-cat-action-fg);
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-form md-outlined-text-field,
+.settings-form md-outlined-select {
+  width: 100%;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.imap-reset-confirmation {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.imap-reset-confirmation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+@media (max-width: 760px) {
+  .processing-banner {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+}
+
+.settings-status {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--md-sys-color-surface-container);
+}
+
+.settings-status-ok {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+.settings-status-error {
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+}
+
+/* ---- toast ---------------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  max-width: min(760px, calc(100vw - 40px));
+  padding: 12px 18px;
+  border-radius: 12px;
+  background: var(--md-sys-color-inverse-surface);
+  color: var(--md-sys-color-inverse-on-surface);
+  font-family: var(--app-mono);
+  font-size: 12.5px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.35);
+  /* Global notifications must remain visible above modal overlays (z-index 20). */
+  z-index: 30;
+  overflow-wrap: anywhere;
+}
+
+/* ---- modal dialogs (reset confirmation, processing options) --------------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 0.4);
+  z-index: 20;
+}
+
+.modal-card {
+  width: min(520px, calc(100vw - 40px));
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  padding: 20px 22px;
+  border-radius: 28px;
+  background: var(--app-queue);
+  color: var(--md-sys-color-on-surface);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-card h3 {
+  margin: 0;
+}
+
+.modal-card p {
+  margin: 0;
+}
+
+.options-card {
+  width: min(760px, calc(100vw - 40px));
+  padding: 0;
+  overflow: hidden;
+  gap: 0;
+}
+
+.options-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 22px;
+  background: var(--app-topbar);
+}
+
+.options-close-button {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  margin: -6px -8px -6px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font: inherit;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.options-close-button:hover,
+.options-close-button:focus-visible {
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+}
+
+.options-layout {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 12px;
+  min-height: 430px;
+  padding: 12px;
+}
+
+.options-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--app-group-message);
+  border-radius: 20px;
+}
+
+.options-nav-button {
+  appearance: none;
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.options-nav-button:hover {
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+}
+
+.options-nav-button.active {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}
+
+.options-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding: 20px 22px;
+  border-radius: 20px;
+  background: var(--app-detail);
+  overflow-y: auto;
+}
+
+.options-content h4 {
+  margin: 0;
+}
+
+.reset-warning {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+}
+
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal-form md-outlined-text-field,
+.modal-form md-outlined-select {
+  width: 100%;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+@media (max-width: 640px) {
+  .options-layout {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .options-sidebar {
+    flex-direction: row;
+  }
+
+  .options-nav-button {
+    flex: 1;
+    text-align: center;
+  }
+}

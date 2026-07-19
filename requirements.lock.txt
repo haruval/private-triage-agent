@@ -27,7 +27,7 @@ fastcoref==2.1.6
 filelock==3.29.0
 fonttools==4.63.0
 frozenlist==1.8.0
-fsspec==2026.4.0
+fsspec==2026.2.0
 h11==0.16.0
 hf-xet==1.5.0
 httpcore==1.0.9
