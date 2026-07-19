@@ -12,7 +12,8 @@ The local model triages every email: category, summary, action items, a reply
 draft. When it's uncertain or the content looks sensitive (legal, negotiation,
 dollar figures), the email is **anonymized**, sent to Claude for a stronger
 draft, then **re-hydrated** locally. Nothing is sent automatically: every draft
-is reviewed by you first. 
+is reviewed by you first, in a React web app with a local web server and API to
+talk to the underlying Python pipeline.
 
 Under the hood, it runs three sequential layers, each covering a failure mode the
 others structurally miss. The default (`combined`) runs all three; `--anonymizer`
@@ -241,16 +242,6 @@ State lives in two append-only ledgers under `data/queue/`
 mail and reviewed email does not reappear. If Claude is unreachable, draft creation stay local and the queue is
 sorted by escalation score instead.
 
-
-Threat model, in brief: this is a **single-user, local-only** tool. Binding to
-localhost is not a security boundary — any web page in your browser can try to
-reach a localhost port via DNS rebinding or CSRF — so every request must carry
-the per-run token (which browser JavaScript never sees; the proxy adds it), pass
-an exact `Host` allowlist, and (for writes) an `Origin` allowlist. The browser
-also never receives the placeholder→original anonymization mapping or the IMAP
-password. Loopback is not a per-user boundary on a shared machine; the token is
-what actually gates access.
-
 ## Email Ingestion
 
 ### Method 1: Connect your inbox over IMAP
@@ -304,6 +295,39 @@ it yourself, and where it goes depends on what email ingestion method you used.
   an `.eml` is written next to the `.txt`.
    Double-clicking it opens a fully pre-filled reply in your email client,
    so you are one click from sending.
+
+## Security
+
+Localhost is not a security boundary, as any web page open in your browser can try to reach a
+local port. Every API request therefore needs a per-run token, which the Vite
+proxy injects so browser JavaScript never sees it, plus strict `Host` and
+`Origin` checks. The browser never receives the anonymization mapping or the IMAP password.
+
+All processing of raw sensitive content
+runs on your machine: triage, sensitivity scoring, anonymization, and
+re-hydration are all local, and the only text that ever leaves is the
+anonymized version sent to Claude on escalation. The IMAP connection is
+read-only, enforced twice:
+
+```python
+status, _ = client.select(folder, readonly=True)  # server rejects flag changes
+...
+status, fetch_data = client.uid("fetch", uid, "(BODY.PEEK[])")  # never sets \Seen
+```
+
+So nothing is ever marked read, deleted, or sent; the one write is the
+explicit APPEND of an approved reply into your Drafts folder.
+
+The supply chain is locked down as well. Python dependencies install from a
+lockfile with exact version pins, and the spaCy NER model wheel is pinned to
+its SHA-256 hash. `make install` runs a package-age check that rejects any
+pinned dependency published less than 14 days ago and fails closed when
+metadata cannot be verified, which blocks freshly published (and possibly
+compromised) releases. The coreference model is locked to an immutable commit
+in `configs/coref_model.lock.json` with a SHA-256 hash for every required
+file; setup copies exactly those files into an isolated runtime directory that
+is hash-checked before every load, and mail processing never downloads models
+or contacts Hugging Face.
 
 ## CLI (optional)
 
