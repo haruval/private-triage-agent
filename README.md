@@ -3,6 +3,7 @@
 A privacy-preserving email triage agent. A local model (`gemma3:27b` via Ollama) handles most processing; sensitive content is anonymized before being sent to the Claude API for harder reasoning, then re-hydrated locally.
 
 <img src="/assets/images/home.png" width="800">
+<img src="/assets/images/home2.png" width="800">
 
 
 ## What it does
@@ -199,7 +200,7 @@ setup above.
 
 ### 1. Run
 
-Start the app with `python triage` as above.
+Start the app with `python triage` as above. Note:
 The API writes a per-run token to `frontend/.dev-token`. The Vite proxy
 re-reads and injects that token into every `/api` request, so browser
 JavaScript never sees it.
@@ -215,7 +216,7 @@ Inbox and Drafts folders, and fetches unread mail without marking it read.
 Or click **Upload .mbox** to choose an exported mailbox. The app copies it into
 `data/inbox/` and starts processing new messages. Note: This currently only works on Mac, for other platforms you'll have to drag the file in yourself. Sorry!
 
-<img src="/assets/images/imap.png" width="800">
+<img src="/assets/images/imap2.png" width="800">
 
 
 ### 3. Review drafts
