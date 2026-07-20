@@ -15,7 +15,7 @@ without your approval.
 The local model triages every email: category, summary, action items, a reply
 draft. Anything uncertain or sensitive-looking (legal language, negotiations,
 dollar figures) gets **anonymized**, sent to Claude for a stronger draft, then
-**re-hydrated** locally — Claude only ever sees placeholder text. You review
+**re-hydrated** locally, so Claude only ever sees placeholder text. You review
 every draft first, in a React web app backed by a local API in front of the
 Python pipeline.
 
@@ -33,8 +33,8 @@ Three layers run in sequence, each catching what the others miss. The default
    (`PERSON`), organizations (`ORG`), locations (`GPE`), facilities (`FAC`).
    This is what turns `Sarah` into `Alex_P1` and `Northwind` into `Acme_O1`.
 3. **Neural coreference.** fastcoref (`biu-nlp/f-coref`) predicts mention
-   clusters — every span that refers to the same entity, returned as character
-   offsets — so "Sarah," "she," and "her" come back as one chain. Each pronoun
+   clusters, every span that refers to the same entity, returned as character
+   offsets, so "Sarah," "she," and "her" come back as one chain. Each pronoun
    gets a grammatical placeholder tied by suffix to the entity NER already
    tagged (`Sarah → Alex_P1`, `she → They_P1`, `her → Their_P1`). Claude can
    see all three refer to entity `P1`, and re-hydration restores each original
@@ -153,7 +153,7 @@ PATH, point it at your interpreter: `make install PYTHON_BIN=python3` (still
 needs to be 3.12+).
 
 The install runs a package-age check that rejects any locked dependency
-published less than 14 days ago — it checks PyPI upload times, plus the GitHub
+published less than 14 days ago. It checks PyPI upload times, plus the GitHub
 release timestamp for the hashed `en_core_web_trf` wheel, and fails closed
 when metadata can't be verified. If you've reviewed a fresh dependency and
 want it anyway: `ALLOW_RECENT_PACKAGES=1 make install`.
@@ -168,7 +168,7 @@ Setup uses the shared Hugging Face cache only as a download source, then
 copies exactly the locked files into an isolated runtime directory under
 `venv/`. The copy has no symlinks or unlisted files and is hash-checked before
 every load, so Transformers can't quietly pick a different checkpoint. Mail
-processing uses only that copy and an in-memory spaCy tokenizer — it never
+processing uses only that copy and an in-memory spaCy tokenizer. It never
 contacts Hugging Face or downloads another model. If the runtime copy goes
 missing, `venv/bin/python scripts/cache_coref_model.py` restores it.
 `make clean` removes it; the shared download cache can stay so the next
@@ -193,14 +193,14 @@ python triage
 This starts the API and Vite server in the right order, opens
 `http://localhost:5173` in your browser, and stops both when you press Ctrl-C.
 Use `python triage --no-browser` if you don't want the browser opened for you.
-No need to activate the venv — the launcher uses `venv/` and expects
+No need to activate the venv; the launcher uses `venv/` and expects
 `frontend/node_modules/` from the setup above.
 
 ### 1. run
 
 Start the app with `python triage` as above. One note: the API writes a
 per-run token to `frontend/.dev-token`, and the Vite proxy injects it into
-every `/api` request — browser JavaScript never sees it.
+every `/api` request, so browser JavaScript never sees it.
 
 <img src="/assets/images/empty.png" width="800">
 
@@ -228,7 +228,7 @@ action items, escalation decision, and an editable draft.
 Choose **Approve**, **Approve edit**, or **Reject**. The reviewed email leaves
 the pending queue and the next one is selected. Approved drafts land in
 `data/approved_drafts/` and, depending on where the email came from, also
-become a click-to-open `.eml` or an IMAP draft — see
+become a click-to-open `.eml` or an IMAP draft; see
 [sending approved replies](#sending-approved-replies). Every decision is
 logged under `logs/sessions/`.
 
@@ -251,7 +251,7 @@ Reading is **read-only** (stdlib `imaplib`): the folder opens with
 `readonly=True` and bodies fetch with `BODY.PEEK[]`, so nothing gets marked
 read, deleted, or sent. The one write the IMAP layer ever makes is saving an
 approved reply into your **Drafts** folder (see
-[sending approved replies](#sending-approved-replies)) — that APPEND is
+[sending approved replies](#sending-approved-replies)); that APPEND is
 append-only and still never sends, marks read, or deletes. Configure via
 environment variables:
 
@@ -288,7 +288,7 @@ send it yourself; where it goes depends on how the email came in.
 2. **IMAP source goes to Drafts.** When the email came in over IMAP
    (`start-imap`), the reply is APPENDed straight into your account's
    **Drafts** folder, flagged as a draft, so it shows up in Gmail / Apple
-   Mail / Outlook ready to review and send — in the same client the message
+   Mail / Outlook ready to review and send, in the same client the message
    came from.
 3. **mbox source creates a `.eml`.** When the email came from an `.mbox`
    file, an `.eml` is written next to the `.txt`. Double-clicking it opens a
@@ -296,7 +296,7 @@ send it yourself; where it goes depends on how the email came in.
 
 ## security
 
-Localhost is not a security boundary — any web page open in your browser can
+Localhost is not a security boundary: any web page open in your browser can
 try to reach a local port. So every API request needs a per-run token, which
 the Vite proxy injects so browser JavaScript never sees it, plus strict `Host`
 and `Origin` checks. The browser never receives the anonymization mapping or
@@ -339,7 +339,7 @@ python -m src.cli reset [-y]           # clear the queue ledgers; -y skips the p
 `start`/`start-imap` also take `--limit`, `--anonymizer regex|regex+ner|combined`,
 `--task`, `--config`, and `--queue-dir`; `review` also takes `--queue-dir`,
 `--approved-dir`, `--sessions-dir`, and `--max-chars`. `reset` deletes the
-processed/reviewed ledgers so the next `start` reprocesses everything —
+processed/reviewed ledgers so the next `start` reprocesses everything;
 approved drafts and session logs are kept.
 
 ## development testing stuff
