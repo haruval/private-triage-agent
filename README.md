@@ -234,18 +234,13 @@ logged under `logs/sessions/`.
 
 <img src="/assets/images/draft.png" width="800">
 
-State lives in two append-only ledgers under `data/queue/`
-(`processed.jsonl`, `reviewed.jsonl`), so processing again only adds unseen
-mail, and reviewed email never reappears. If Claude is unreachable, drafts
-stay local and the queue sorts by escalation score instead.
 
 ## email ingestion
 
 ### Method 1: connect your inbox over IMAP
 
 Use **Connect IMAP** in the web UI to save the account settings and fetch
-unread mail. The equivalent terminal commands are in the
-[CLI section](#cli-optional) below.
+unread mail. 
 
 Reading is **read-only** (stdlib `imaplib`): the folder opens with
 `readonly=True` and bodies fetch with `BODY.PEEK[]`, so nothing gets marked
@@ -283,16 +278,17 @@ On a Mac, Apple Mail is the easiest way to export directly to `.mbox`:
 The pipeline never sends mail. Approving a draft just persists it so you can
 send it yourself; where it goes depends on how the email came in.
 
-1. **Plain text (always).** Every approved draft is written to
-   `data/approved_drafts/<message-id>.txt`.
-2. **IMAP source goes to Drafts.** When the email came in over IMAP
+
+1. **IMAP source goes to Drafts.** When the email came in over IMAP
    (`start-imap`), the reply is APPENDed straight into your account's
    **Drafts** folder, flagged as a draft, so it shows up in Gmail / Apple
    Mail / Outlook ready to review and send, in the same client the message
    came from.
-3. **mbox source creates a `.eml`.** When the email came from an `.mbox`
+2. **mbox source creates a `.eml`.** When the email came from an `.mbox`
    file, an `.eml` is written next to the `.txt`. Double-clicking it opens a
    fully pre-filled reply in your email client, one click from sending.
+1. **Plain text (always).** Every approved draft is written to
+   `data/approved_drafts/<message-id>.txt`.
 
 ## security
 
