@@ -1,10 +1,8 @@
 # private-triage-agent
 
 A privacy-preserving email triage agent. A local model (`gemma3:27b` via
-Ollama) handles your whole inbox on your machine. When an email needs harder
-reasoning, it's anonymized (regex → transformer NER → neural coreference),
-sent to Claude as placeholders, and re-hydrated locally. Nothing is ever sent
-without your approval.
+Ollama) processes your whole inbox locally on your machine, and when an email needs harder
+reasoning, sensitive data is stripped (regex → transformer NER → neural coreference), sent to Claude as placeholders, and re-hydrated locally. Approved drafts go into your email's drafts folder, and nothing is ever sent without your review. 
 
 <img src="/assets/images/home.png" width="800">
 <img src="/assets/images/home2.png" width="800">
@@ -12,18 +10,16 @@ without your approval.
 
 ## what it does
 
-The local model triages every email: category, summary, action items, a reply
+The local model triages every email for category, summary, action items, and starts a reply
 draft. Anything uncertain or sensitive-looking (legal language, negotiations,
 dollar figures) gets **anonymized**, sent to Claude for a stronger draft, then
-**re-hydrated** locally, so Claude only ever sees placeholder text. You review
-every draft first, in a React web app backed by a local API in front of the
-Python pipeline.
+**re-hydrated** locally, so Claude only ever sees the placeholder text. You edit and review the drafts first in a React web app with a local API in front of the Python pipeline.
+
+
 
 ## the anonymization stack
 
-Three layers run in sequence, each catching what the others miss. The default
-(`combined`) runs all three; `--anonymizer regex+ner` drops coref, and
-`--anonymizer regex` runs the first layer alone.
+Three layers run in sequence, each catching what the others miss.
 
 1. **Deterministic regex** for fixed-shape PII: email addresses, phone
    numbers, dollar amounts, dates. Fast and exact, but won't catch anything
@@ -50,10 +46,7 @@ When layers flag overlapping spans, the longest match wins, and replacements
 apply right-to-left so earlier character offsets stay valid. Every entity maps
 to a stable, proper-noun-shaped placeholder (`Alex_P1`, `Acme_O1`,
 `Amount_M1`), so Claude reads them as normal names rather than opaque
-redactions. Its system prompt requires copying every placeholder back
-verbatim, which is what makes local re-hydration exact. Coreference models are
-imperfect, so a held-out eval harness reports the residual PII leak rate per
-layer.
+redactions. Because coreference models are imperfect, a held-out eval harness measures the residual PII leak rate of each layer.
 
 
 Here's one email going through the pipeline.
@@ -71,7 +64,7 @@ and confirm the $250,000 figure before Friday?
 Also - can we move our call to Thursday? Reach me at (415) 555-0182.
 ```
 
-**2. Local triage** (`gemma3:27b`) - never leaves your machine
+**2. Local triage** (`gemma3:27b`) - on your machine
 
 ```
 category    : action_required   (confidence 0.85)
@@ -180,9 +173,9 @@ Claude escalation and ranking need `ANTHROPIC_API_KEY`:
 cp .env.example .env      # fill in ANTHROPIC_API_KEY
 ```
 
-The key is optional: without it, drafts stay local and the queue sorts by
+If you don't put an API key in, drafts stay local and the queue sorts by
 escalation score instead. IMAP settings can be entered through the web UI's
-**Connect IMAP** form, which writes them to `.env`.
+**Connect IMAP** menu, which writes them to `.env`.
 
 After that one-time setup, start the whole app with:
 
@@ -198,9 +191,7 @@ No need to activate the venv; the launcher uses `venv/` and expects
 
 ### 1. run
 
-Start the app with `python triage` as above. One note: the API writes a
-per-run token to `frontend/.dev-token`, and the Vite proxy injects it into
-every `/api` request, so browser JavaScript never sees it.
+Start the app with `python triage`.
 
 <img src="/assets/images/empty.png" width="800">
 
@@ -211,7 +202,7 @@ process mail**. The form saves the `IMAP_*` values to `.env`, verifies the
 Inbox and Drafts folders, and fetches unread mail without marking it read.
 
 Or click **Upload .mbox** to pick an exported mailbox. The app copies it into
-`data/inbox/` and starts processing new messages. This currently only works on
+`data/inbox/` and starts processing new messages. Note: this currently only works on
 Mac; on other platforms you'll have to drag the file in yourself. Sorry!
 
 <img src="/assets/images/imap2.png" width="800">
@@ -225,12 +216,8 @@ action items, escalation decision, and an editable draft.
 <img src="/assets/images/queue.png" width="800">
 <img src="/assets/images/details.png" width="800">
 
-Choose **Approve**, **Approve edit**, or **Reject**. The reviewed email leaves
-the pending queue and the next one is selected. Approved drafts land in
-`data/approved_drafts/` and, depending on where the email came from, also
-become a click-to-open `.eml` or an IMAP draft; see
-[sending approved replies](#sending-approved-replies). Every decision is
-logged under `logs/sessions/`.
+
+Choose **Approve**, **Approve edit**, or **Reject**. If the email came through an IMAP connection, it will end up in your inbox's drafts folder for you to send, and if it came from an uploaded `.mbox` file it will leave you with a `.eml` file that you can double click to open the email in your email client. 
 
 <img src="/assets/images/draft.png" width="800">
 
@@ -247,16 +234,7 @@ Reading is **read-only** (stdlib `imaplib`): the folder opens with
 read, deleted, or sent. The one write the IMAP layer ever makes is saving an
 approved reply into your **Drafts** folder (see
 [sending approved replies](#sending-approved-replies)); that APPEND is
-append-only and still never sends, marks read, or deletes. Configure via
-environment variables:
-
-```
-IMAP_HOST=imap.gmail.com
-IMAP_USER=you@example.com
-IMAP_PASS=<imap app password *see below*>
-IMAP_FOLDER=INBOX          # optional
-IMAP_DRAFTS_FOLDER=[Gmail]/Drafts  # Gmail; provider is prefilled in the web UI
-```
+append-only and still never sends, marks read, or deletes. 
 
 **USE A PASSWORD JUST FOR THIS, NOT YOUR REAL ACCOUNT PASSWORD. I WOULD NOT TRUST ME THAT MUCH.** For Gmail
 that's Google Account → Security → 2-Step Verification → App passwords; most
@@ -264,7 +242,7 @@ providers have an equivalent.
 
 ### Method 2: upload your emails as an .mbox
 
-On a Mac, Apple Mail is the easiest way to export directly to `.mbox`:
+On a Mac, Apple Mail is the easiest way to export emails as `.mbox` files:
 
 1. Open Apple Mail.
 2. Go to Mailbox > New Mailbox in the top menu bar and create a local folder (e.g., name it "Weekly Export" and set the location to "On My Mac").
@@ -275,9 +253,6 @@ On a Mac, Apple Mail is the easiest way to export directly to `.mbox`:
 
 ## sending approved replies
 
-The pipeline never sends mail. Approving a draft just persists it so you can
-send it yourself; where it goes depends on how the email came in.
-
 
 1. **IMAP source goes to Drafts.** When the email came in over IMAP
    (`start-imap`), the reply is APPENDed straight into your account's
@@ -287,21 +262,19 @@ send it yourself; where it goes depends on how the email came in.
 2. **mbox source creates a `.eml`.** When the email came from an `.mbox`
    file, an `.eml` is written next to the `.txt`. Double-clicking it opens a
    fully pre-filled reply in your email client, one click from sending.
-1. **Plain text (always).** Every approved draft is written to
+1. **.txt.** Every approved draft is also saved to
    `data/approved_drafts/<message-id>.txt`.
 
 ## security
 
-Localhost is not a security boundary: any web page open in your browser can
-try to reach a local port. So every API request needs a per-run token, which
-the Vite proxy injects so browser JavaScript never sees it, plus strict `Host`
-and `Origin` checks. The browser never receives the anonymization mapping or
-the IMAP password.
-
 All processing of raw sensitive content runs on your machine: triage,
 sensitivity scoring, anonymization, and re-hydration are all local. The only
 text that ever leaves is the anonymized version sent to Claude on escalation.
-The IMAP connection is read-only, enforced twice:
+
+Any web page can probe local ports, so each run gets a fresh token the Vite proxy attaches to every request, and the server checks that the the Host and Origin headers match the expected values. The page itself never holds the token or your IMAP password.
+
+
+The IMAP connection is read-only:
 
 ```python
 status, _ = client.select(folder, readonly=True)  # server rejects flag changes
@@ -309,8 +282,7 @@ status, _ = client.select(folder, readonly=True)  # server rejects flag changes
 status, fetch_data = client.uid("fetch", uid, "(BODY.PEEK[])")  # never sets \Seen
 ```
 
-So nothing is ever marked read, deleted, or sent; the one write is the
-explicit APPEND of an approved reply into your Drafts folder.
+So nothing is ever marked read, deleted, or sent. The one write is the APPEND of an approved reply into your Drafts folder.
 
 The supply chain is locked down too. Python dependencies install from a
 lockfile with exact pins, and the spaCy NER wheel is pinned to its SHA-256.
@@ -322,7 +294,7 @@ SHA-256 for every required file; setup copies exactly those files into an
 isolated runtime directory that is hash-checked before every load, and mail
 processing never downloads models or contacts Hugging Face.
 
-## CLI (optional)
+## CLI from before i made the ui. still here if you want it. 
 
 ```sh
 source venv/bin/activate
