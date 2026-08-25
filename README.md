@@ -1,7 +1,7 @@
 # private-triage-agent
 
 A privacy-preserving email triage agent. A local model (`gemma3:27b` via
-Ollama) processes your whole inbox locally on your machine, and when an email needs harder
+Ollama) processes your whole inbox on your machine, and when an email needs harder
 reasoning, sensitive data is stripped (regex → transformer NER → neural coreference), sent to Claude as placeholders, and re-hydrated locally. Approved drafts go into your email's drafts folder, and nothing is ever sent without your review. 
 
 <img src="/assets/images/home.png" width="800">
