@@ -44,7 +44,7 @@ Three layers run in sequence, each catching what the others miss.
 
 When layers flag overlapping spans, the longest match wins, and replacements
 apply right-to-left so earlier character offsets stay valid. Every entity maps
-to a stable, proper-noun-shaped placeholder (`Alex_P1`, `Acme_O1`,
+to a consistent, proper-noun-shaped placeholder (`Alex_P1`, `Acme_O1`,
 `Amount_M1`), so Claude reads them as normal names rather than opaque
 redactions. Because coreference models are imperfect, a held-out eval harness measures the residual PII leak rate of each layer.
 
